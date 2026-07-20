@@ -1,6 +1,6 @@
 package brickly
 
-// WindowOptions 对应 host.ui.createBrowserWindow 的 options 字段。
+// WindowOptions 对应 host.ui.window.create 的 options 字段。
 // 用 map 以保持与 schema 自由演进同步；常用键请参考 specs/window-api.md。
 type WindowOptions map[string]any
 
@@ -14,19 +14,25 @@ type UI struct {
 // url 可以是 http(s)、file:// 或相对 ui/ 目录的 html 路径。
 func (u *UI) CreateBrowserWindow(url string, options WindowOptions) (*WindowHandle, error) {
 	msg := map[string]any{
-		"type": "host.ui.createBrowserWindow",
+		"type": "host.ui.window.create",
 		"url":  url,
 	}
 	if options != nil {
 		msg["options"] = options
 	}
 	var res struct {
-		WindowID int64 `json:"windowId"`
+		WindowKey     string `json:"windowKey"`
+		WindowID      int64  `json:"windowId"`
+		WebContentsID int64  `json:"webContentsId"`
+		URL           string `json:"url"`
 	}
 	if err := u.runtime.transport.hostCall(msg, &res); err != nil {
 		return nil, err
 	}
-	h := newWindowHandle(u.runtime, res.WindowID)
+	if res.WindowKey == "" || res.WindowID == 0 || res.WebContentsID == 0 {
+		return nil, NewBppError("PROTOCOL_ERROR", "host.ui.window.create returned an invalid result")
+	}
+	h := newWindowHandleFromResult(u.runtime, res.WindowKey, res.WindowID, res.WebContentsID, res.URL)
 	u.runtime.windowsMu.Lock()
 	u.runtime.windows[res.WindowID] = h
 	u.runtime.windowsMu.Unlock()
@@ -37,7 +43,7 @@ func (u *UI) CreateBrowserWindow(url string, options WindowOptions) (*WindowHand
 func (u *UI) ListWindows() ([]map[string]any, error) {
 	var out []map[string]any
 	err := u.runtime.transport.hostCall(map[string]any{
-		"type": "host.ui.listWindows",
+		"type": "host.ui.window.list",
 	}, &out)
 	return out, err
 }
@@ -47,6 +53,7 @@ func (u *UI) ListWindows() ([]map[string]any, error) {
 type ScopedUI struct {
 	runtime         *Runtime
 	parentRequestID string
+	trace           *TraceContext
 }
 
 func (u *ScopedUI) CreateBrowserWindow(url string, options WindowOptions) (*ScopedWindowHandle, error) {
@@ -54,7 +61,7 @@ func (u *ScopedUI) CreateBrowserWindow(url string, options WindowOptions) (*Scop
 	if err != nil {
 		return nil, err
 	}
-	return &ScopedWindowHandle{WindowHandle: win, parentRequestID: u.parentRequestID}, nil
+	return &ScopedWindowHandle{WindowHandle: win, parentRequestID: u.parentRequestID, trace: u.trace}, nil
 }
 
 func (u *ScopedUI) ListWindows() ([]map[string]any, error) {

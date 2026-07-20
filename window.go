@@ -50,7 +50,7 @@ type OpenDevToolsOptions struct {
 	Mode string `json:"mode,omitempty"`
 }
 
-// WindowHandle 是一个子窗口的句柄，封装 host.ui.callWindow 白名单 91 个方法。
+// WindowHandle 是一个子窗口句柄，封装 host.ui.window.call 反射方法。
 //
 //   - 所有 setXxx / 动作方法返回 error。
 //   - 所有 getXxx / isXxx 返回 (值, error)。
@@ -58,16 +58,33 @@ type OpenDevToolsOptions struct {
 //
 // 事件通过 On("closed" / "focus" / "blur" / "message" / ...) 订阅。
 type WindowHandle struct {
-	ID int64
+	ID            int64
+	WindowKey     string
+	WebContentsID int64
+	URL           string
 
 	runtime *Runtime
 
-	mu     sync.Mutex
-	closed bool
+	mu           sync.Mutex
+	closed       bool
+	closeAttempt *windowCloseAttempt
+	forceAttempt *windowForceAttempt
 
 	handlersMu sync.RWMutex
 	handlers   map[string]map[uint64]func(payload map[string]any)
 	handlerSeq atomic.Uint64
+}
+
+type windowCloseAttempt struct {
+	done   chan struct{}
+	result WindowRequestCloseResult
+	err    error
+}
+
+type windowForceAttempt struct {
+	done   chan struct{}
+	result WindowTerminationResult
+	err    error
 }
 
 func newWindowHandle(p *Runtime, id int64) *WindowHandle {
@@ -78,7 +95,15 @@ func newWindowHandle(p *Runtime, id int64) *WindowHandle {
 	}
 }
 
-// Call 通用调用：走 host.ui.callWindow 白名单。
+func newWindowHandleFromResult(p *Runtime, key string, id, webContentsID int64, url string) *WindowHandle {
+	handle := newWindowHandle(p, id)
+	handle.WindowKey = key
+	handle.WebContentsID = webContentsID
+	handle.URL = url
+	return handle
+}
+
+// Call 通用调用：走 host.ui.window.call 白名单。
 //
 // 通常你只需要用强类型方法（SetBounds / GetTitle / ...），但当宿主提前
 // 开放了新方法、而 SDK 尚未升级时，可用 Call 直接调用。
@@ -87,10 +112,27 @@ func (w *WindowHandle) Call(method string, args []any, into any) error {
 }
 
 func (w *WindowHandle) callWithParent(method string, args []any, parentRequestID string, into any) error {
+	return w.callWithParentTrace(method, args, parentRequestID, nil, into)
+}
+
+func (w *WindowHandle) callWithParentTrace(method string, args []any, parentRequestID string, trace *TraceContext, into any) error {
+	if method == "close" || method == "destroy" {
+		return NewBppError("INVALID_INPUT", method+" is a lifecycle operation, not a reflected call")
+	}
 	w.mu.Lock()
 	closed := w.closed
+	runtime := w.runtime
 	w.mu.Unlock()
-	if closed && method != "isDestroyed" {
+	if closed && method == "isDestroyed" {
+		if value, ok := into.(*bool); ok {
+			*value = true
+		}
+		return nil
+	}
+	if closed {
+		return NewBppError("INVALID_INPUT", "Window already closed")
+	}
+	if runtime == nil {
 		return NewBppError("INVALID_INPUT", "Window already closed")
 	}
 	if args == nil {
@@ -103,7 +145,7 @@ func (w *WindowHandle) callWithParent(method string, args []any, parentRequestID
 		return parentInvocationRequired("webContents.Send must run through CommandContext.UI or include payload.requestId")
 	}
 	msg := map[string]any{
-		"type":     "host.ui.callWindow",
+		"type":     "host.ui.window.call",
 		"windowId": w.ID,
 		"method":   method,
 		"args":     args,
@@ -111,22 +153,106 @@ func (w *WindowHandle) callWithParent(method string, args []any, parentRequestID
 	if parentRequestID != "" {
 		msg["parentRequestId"] = parentRequestID
 	}
-	return w.runtime.transport.hostCall(msg, into)
+	withTrace(msg, trace)
+	return runtime.transport.hostCall(msg, into)
 }
 
-// Close 走 host.ui.closeWindow（非白名单），触发 window.closed 事件。
-func (w *WindowHandle) Close() error {
+// Close 请求普通关闭；pending/prevented 时句柄保持可用。
+func (w *WindowHandle) Close() (WindowRequestCloseResult, error) {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
-		return nil
+		return WindowRequestCloseResult{Status: WindowCloseNotFound}, nil
 	}
-	w.closed = true
+	if attempt := w.closeAttempt; attempt != nil {
+		w.mu.Unlock()
+		<-attempt.done
+		return attempt.result, attempt.err
+	}
+	attempt := &windowCloseAttempt{done: make(chan struct{})}
+	w.closeAttempt = attempt
+	runtime := w.runtime
 	w.mu.Unlock()
-	return w.runtime.transport.hostCall(map[string]any{
-		"type":     "host.ui.closeWindow",
+	if runtime == nil {
+		err := NewBppError("INVALID_INPUT", "Window already closed")
+		w.finishCloseAttempt(attempt, WindowRequestCloseResult{}, err)
+		return WindowRequestCloseResult{}, err
+	}
+
+	var result WindowRequestCloseResult
+	err := runtime.transport.hostCall(map[string]any{
+		"type":     "host.ui.window.requestClose",
 		"windowId": w.ID,
-	}, nil)
+	}, &result)
+	if err == nil && !validWindowCloseStatus(result.Status) {
+		err = NewBppError("PROTOCOL_ERROR", "host.ui.window.requestClose returned an invalid result")
+	}
+	if err == nil && (result.Status == WindowCloseClosed || result.Status == WindowCloseNotFound) {
+		w.disposeLocal("")
+	}
+
+	w.finishCloseAttempt(attempt, result, err)
+	return result, err
+}
+
+// ForceClose 强制终止窗口，不经过页面关闭协商。
+func (w *WindowHandle) ForceClose() (WindowTerminationResult, error) {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return WindowTerminationResult{}, NewBppError("INVALID_INPUT", "Window already closed")
+	}
+	if attempt := w.forceAttempt; attempt != nil {
+		w.mu.Unlock()
+		<-attempt.done
+		return attempt.result, attempt.err
+	}
+	attempt := &windowForceAttempt{done: make(chan struct{})}
+	w.forceAttempt = attempt
+	runtime := w.runtime
+	w.mu.Unlock()
+	if runtime == nil {
+		err := NewBppError("INVALID_INPUT", "Window already closed")
+		w.finishForceAttempt(attempt, WindowTerminationResult{}, err)
+		return WindowTerminationResult{}, err
+	}
+
+	var result WindowTerminationResult
+	err := runtime.transport.hostCall(map[string]any{
+		"type":     "host.ui.window.forceClose",
+		"windowId": w.ID,
+	}, &result)
+	if err == nil && !validWindowTerminationResult(result) {
+		err = NewBppError("PROTOCOL_ERROR", "host.ui.window.forceClose returned an invalid result")
+	}
+	if err == nil {
+		w.disposeLocal("")
+	}
+
+	w.finishForceAttempt(attempt, result, err)
+	return result, err
+}
+
+func (w *WindowHandle) finishCloseAttempt(attempt *windowCloseAttempt, result WindowRequestCloseResult, err error) {
+	w.mu.Lock()
+	attempt.result = result
+	attempt.err = err
+	if w.closeAttempt == attempt {
+		w.closeAttempt = nil
+	}
+	close(attempt.done)
+	w.mu.Unlock()
+}
+
+func (w *WindowHandle) finishForceAttempt(attempt *windowForceAttempt, result WindowTerminationResult, err error) {
+	w.mu.Lock()
+	attempt.result = result
+	attempt.err = err
+	if w.forceAttempt == attempt {
+		w.forceAttempt = nil
+	}
+	close(attempt.done)
+	w.mu.Unlock()
 }
 
 // IsClosed 返回本地记录的关闭状态（不发协议消息）。
@@ -144,29 +270,39 @@ func (w *WindowHandle) IsClosed() bool {
 // unmaximize / restore / show / hide / enter-full-screen / leave-full-screen。
 func (w *WindowHandle) On(event string, fn func(payload map[string]any)) func() {
 	id := w.handlerSeq.Add(1)
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return func() {}
+	}
 	w.handlersMu.Lock()
 	if w.handlers[event] == nil {
 		w.handlers[event] = make(map[uint64]func(map[string]any))
 	}
 	w.handlers[event][id] = fn
 	w.handlersMu.Unlock()
+	w.mu.Unlock()
 	return func() {
 		w.handlersMu.Lock()
 		defer w.handlersMu.Unlock()
 		if m := w.handlers[event]; m != nil {
 			delete(m, id)
+			if len(m) == 0 {
+				delete(w.handlers, event)
+			}
 		}
 	}
 }
 
 func (w *WindowHandle) emit(event string, payload map[string]any) {
 	if event == "closed" {
-		w.mu.Lock()
-		w.closed = true
+		w.dispatchHandlers(w.disposeLocal("closed"), payload)
+		return
+	}
+	w.mu.Lock()
+	if w.closed {
 		w.mu.Unlock()
-		w.runtime.windowsMu.Lock()
-		delete(w.runtime.windows, w.ID)
-		w.runtime.windowsMu.Unlock()
+		return
 	}
 	w.handlersMu.RLock()
 	m := w.handlers[event]
@@ -175,6 +311,11 @@ func (w *WindowHandle) emit(event string, payload map[string]any) {
 		fns = append(fns, fn)
 	}
 	w.handlersMu.RUnlock()
+	w.mu.Unlock()
+	w.dispatchHandlers(fns, payload)
+}
+
+func (w *WindowHandle) dispatchHandlers(fns []func(map[string]any), payload map[string]any) {
 	// 同 EventBus.dispatch：在 goroutine 中触发，避免 readLoop 自死锁。
 	for _, fn := range fns {
 		go func(f func(map[string]any)) {
@@ -184,7 +325,44 @@ func (w *WindowHandle) emit(event string, payload map[string]any) {
 	}
 }
 
-// —— 以下是 91 个白名单方法的强类型包装，按 specs/window-api.md 分组 ——
+func (w *WindowHandle) disposeLocal(terminalEvent string) []func(map[string]any) {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
+	}
+	w.closed = true
+	runtime := w.runtime
+	if runtime != nil {
+		runtime.removeWindow(w.ID, w)
+	}
+	w.runtime = nil
+	w.handlersMu.Lock()
+	fns := make([]func(map[string]any), 0)
+	if terminalEvent != "" {
+		for _, fn := range w.handlers[terminalEvent] {
+			fns = append(fns, fn)
+		}
+	}
+	w.handlers = make(map[string]map[uint64]func(map[string]any))
+	w.handlersMu.Unlock()
+	w.mu.Unlock()
+	return fns
+}
+
+func validWindowCloseStatus(status WindowCloseStatus) bool {
+	return status == WindowCloseClosed || status == WindowClosePrevented ||
+		status == WindowClosePending || status == WindowCloseNotFound
+}
+
+func validWindowTerminationResult(result WindowTerminationResult) bool {
+	validEvent := result.Event == WindowTerminalEventSent || result.Event == WindowTerminalEventSkipped || result.Event == WindowTerminalEventFailed
+	validWindow := result.Window == WindowNativeDestroyed || result.Window == WindowNativeAlreadyDestroyed || result.Window == WindowNativeFailed
+	validLifecycle := result.Lifecycle == WindowLifecycleReleaseReleased || result.Lifecycle == WindowLifecycleReleaseQueued || result.Lifecycle == WindowLifecycleReleaseNotBound
+	return validEvent && validWindow && validLifecycle && result.Errors != nil
+}
+
+// —— 以下是窗口反射方法的强类型包装，按 specs/window-api.md 分组 ——
 
 // 1. 几何 / 位置（17）=====================================================
 
@@ -282,12 +460,9 @@ func (w *WindowHandle) SetFullScreen(flag bool) error {
 	return w.Call("setFullScreen", []any{flag}, nil)
 }
 
-// Destroy 强制销毁窗口（不触发 close 事件），等价于 BrowserWindow.destroy()。慎用。
-func (w *WindowHandle) Destroy() error {
-	w.mu.Lock()
-	w.closed = true
-	w.mu.Unlock()
-	return w.Call("destroy", nil, nil)
+// Destroy 是旧便利名，统一进入强制终止事务。
+func (w *WindowHandle) Destroy() (WindowTerminationResult, error) {
+	return w.ForceClose()
 }
 
 // 3. 状态查询（23，全部 bool）============================================
@@ -547,6 +722,7 @@ func (wc *WebContents) Redo() error      { return wc.w.Call("webContents.redo", 
 type ScopedWindowHandle struct {
 	*WindowHandle
 	parentRequestID string
+	trace           *TraceContext
 }
 
 func (w *ScopedWindowHandle) WebContents() *ScopedWebContents {
@@ -559,7 +735,7 @@ type ScopedWebContents struct {
 }
 
 func (wc *ScopedWebContents) Send(channel string, args ...any) error {
-	return wc.w.WindowHandle.callWithParent("webContents.send", append([]any{channel}, args...), wc.w.parentRequestID, nil)
+	return wc.w.WindowHandle.callWithParentTrace("webContents.send", append([]any{channel}, args...), wc.w.parentRequestID, wc.w.trace, nil)
 }
 
 func explicitPayloadRequestID(args []any) string {

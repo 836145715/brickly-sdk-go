@@ -8,20 +8,28 @@ import "context"
 type CommandContext struct {
 	RequestID string
 	CommandID string
+	Trace     *TraceContext
 
 	runtime *Runtime
 	ctx     context.Context
 	cancel  context.CancelFunc
+
+	platform *PlatformAPI
+	system   *SystemAPI
 }
 
-func newCommandContext(p *Runtime, reqID, commandID string) *CommandContext {
+func newCommandContext(p *Runtime, reqID, commandID string, trace *TraceContext) *CommandContext {
 	ctx, cancel := context.WithCancel(context.Background())
+	system := &SystemAPI{runtime: p, trace: trace}
 	c := &CommandContext{
 		RequestID: reqID,
 		CommandID: commandID,
+		Trace:     trace,
 		runtime:   p,
 		ctx:       ctx,
 		cancel:    cancel,
+		platform:  &PlatformAPI{System: system, Clipboard: &ClipboardAPI{runtime: p, trace: trace}},
+		system:    system,
 	}
 	p.cancelMu.Lock()
 	p.cancelHandlers[reqID] = cancel
@@ -75,20 +83,48 @@ func (c *CommandContext) Chunk(name string, chunk any) {
 
 // UI 返回当前 command 作用域下的 UI 门面。
 func (c *CommandContext) UI() *ScopedUI {
-	return &ScopedUI{runtime: c.runtime, parentRequestID: c.RequestID}
+	return &ScopedUI{runtime: c.runtime, parentRequestID: c.RequestID, trace: c.Trace}
 }
 
 // Events 返回 Brick 级事件总线（与 Runtime.Events 同源）。
 func (c *CommandContext) Events() *EventBus { return c.runtime.Events }
 
-// Platform 返回宿主平台能力门面（与 Runtime.Platform 同源）。
-func (c *CommandContext) Platform() *PlatformAPI { return c.runtime.Platform }
+// Platform 返回宿主平台能力门面（与 Runtime.Platform 同源），携带当前 command 的 trace。
+func (c *CommandContext) Platform() *PlatformAPI {
+	return c.platform
+}
 
-// System 返回宿主系统能力门面（与 Runtime.System / Runtime.Platform.System 同源）。
-func (c *CommandContext) System() *SystemAPI { return c.runtime.System }
+// System 返回宿主系统能力门面（与 Runtime.System / Runtime.Platform.System 同源），携带当前 command 的 trace。
+func (c *CommandContext) System() *SystemAPI {
+	return c.system
+}
 
 // Config 返回由 host.hello.config 注入的当前 Profile 配置快照。
 func (c *CommandContext) Config() map[string]any { return c.runtime.Config }
+
+// Debug 发送 debug 级别结构化日志到宿主，自动绑定当前 command 的 trace。
+func (c *CommandContext) Debug(message string, fields map[string]any) {
+	c.runtime.transport.sendLog("debug", message, fields, nil, c.Trace)
+}
+
+// Info 发送 info 级别结构化日志到宿主，自动绑定当前 command 的 trace。
+func (c *CommandContext) Info(message string, fields map[string]any) {
+	c.runtime.transport.sendLog("info", message, fields, nil, c.Trace)
+}
+
+// Warn 发送 warn 级别结构化日志到宿主，自动绑定当前 command 的 trace。
+func (c *CommandContext) Warn(message string, fields map[string]any) {
+	c.runtime.transport.sendLog("warn", message, fields, nil, c.Trace)
+}
+
+// Error 发送 error 级别结构化日志到宿主，自动绑定当前 command 的 trace。
+func (c *CommandContext) Error(message string, err error, fields map[string]any) {
+	var errPayload map[string]any
+	if err != nil {
+		errPayload = map[string]any{"code": "BRICK_ERROR", "message": err.Error()}
+	}
+	c.runtime.transport.sendLog("error", message, fields, errPayload, c.Trace)
+}
 
 // Invoke 跨 Brick 调用命令。宿主会自动管理目标 Brick 实例生命周期。
 func (c *CommandContext) Invoke(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
@@ -97,6 +133,7 @@ func (c *CommandContext) Invoke(brickID, commandID string, input any, into any, 
 	}
 	opts = append(opts, func(options *invokeOptions) {
 		options.parentRequestID = c.RequestID
+		options.trace = c.Trace
 	})
 	return c.runtime.Invoke(brickID, commandID, input, into, opts...)
 }
@@ -108,6 +145,7 @@ func (c *CommandContext) InvokeStream(brickID, commandID string, input any, opts
 	}
 	opts = append(opts, func(options *invokeOptions) {
 		options.parentRequestID = c.RequestID
+		options.trace = c.Trace
 	})
 	return c.runtime.InvokeStream(brickID, commandID, input, opts...)
 }
@@ -119,6 +157,7 @@ func (c *CommandContext) OpenSession(brickID string, opts ...SessionOption) (*Br
 	}
 	opts = append(opts, func(options *sessionOptions) {
 		options.parentRequestID = c.RequestID
+		options.trace = c.Trace
 	})
 	return c.runtime.OpenSession(brickID, opts...)
 }

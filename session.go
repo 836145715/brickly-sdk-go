@@ -6,6 +6,7 @@ type SessionOption func(*sessionOptions)
 type sessionOptions struct {
 	profileID       string
 	parentRequestID string
+	trace           *TraceContext
 }
 
 // WithSessionProfileID 指定目标 Brick 的 Profile ID。
@@ -22,6 +23,7 @@ type BrickSession struct {
 	BrickID         string
 	ProfileID       string
 	parentRequestID string
+	trace           *TraceContext
 }
 
 // OpenSession 打开跨 Brick 会话。宿主会在会话期间保留目标 Brick 实例状态。
@@ -38,6 +40,9 @@ func (p *Runtime) OpenSession(brickID string, opts ...SessionOption) (*BrickSess
 	}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
+	}
+	if tm := options.trace.asMap(); tm != nil {
+		msg["trace"] = tm
 	}
 	var result struct {
 		SessionID string `json:"sessionId"`
@@ -56,6 +61,7 @@ func (p *Runtime) OpenSession(brickID string, opts ...SessionOption) (*BrickSess
 		BrickID:         result.BrickID,
 		ProfileID:       result.ProfileID,
 		parentRequestID: options.parentRequestID,
+		trace:           options.trace,
 	}, nil
 }
 
@@ -64,13 +70,37 @@ func (s *BrickSession) Invoke(commandID string, input any, into any) error {
 	if s.parentRequestID == "" || !s.runtime.isCommandActive(s.parentRequestID) {
 		return parentInvocationRequired("session.Invoke must run inside an active command handler")
 	}
-	return s.runtime.transport.hostCall(map[string]any{
+	msg := map[string]any{
 		"type":            "host.session.invoke",
 		"sessionId":       s.ID,
 		"commandId":       commandID,
 		"input":           input,
 		"parentRequestId": s.parentRequestID,
-	}, into)
+	}
+	if tm := s.trace.asMap(); tm != nil {
+		msg["trace"] = tm
+	}
+	return s.runtime.transport.hostCall(msg, into)
+}
+
+// InvokeStream 在会话绑定的目标 Brick 实例上流式调用命令。
+func (s *BrickSession) InvokeStream(commandID string, input any) (<-chan InvokeStreamEvent, <-chan error) {
+	if s.parentRequestID == "" || !s.runtime.isCommandActive(s.parentRequestID) {
+		return failedInvokeStream(parentInvocationRequired("session.InvokeStream 必须在有效 command handler 内调用"))
+	}
+	msg := map[string]any{
+		"type":            "host.session.invoke",
+		"id":              s.runtime.transport.nextID(),
+		"sessionId":       s.ID,
+		"commandId":       commandID,
+		"input":           input,
+		"parentRequestId": s.parentRequestID,
+		"stream":          true,
+	}
+	if tm := s.trace.asMap(); tm != nil {
+		msg["trace"] = tm
+	}
+	return s.runtime.invokeStreamMessage(msg)
 }
 
 // Close 关闭会话并释放宿主持有的目标 Brick 实例。

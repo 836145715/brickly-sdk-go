@@ -8,7 +8,8 @@
 //	})
 //	p.Start() // 阻塞，直到 stdin 关闭或收到 runtime.shutdown
 //
-// 零外部依赖，只使用 Go 标准库。stdout 仅写 BPP 协议；所有日志走 stderr。
+// 零外部依赖，只使用 Go 标准库。
+// stdout 仅写 BPP 协议；业务日志必须用 Info/Warn/Error/Debug（runtime.log），禁止无 level 的 stderr 业务输出。
 package brickly
 
 import (
@@ -48,6 +49,8 @@ type ReadyHandler func() error
 // ShutdownHandler 在收到 runtime.shutdown 时触发；返回后 SDK 自动发 runtime.bye 并退出。
 type ShutdownHandler func() error
 
+const maxTerminalWindowEventIDs = 1024
+
 // Runtime 是 SDK 主入口，通过 New 创建。
 type Runtime struct {
 	brickID         string
@@ -75,6 +78,10 @@ type Runtime struct {
 	windowsMu sync.RWMutex
 	windows   map[int64]*WindowHandle
 
+	terminalWindowEventsMu sync.Mutex
+	terminalWindowEventIDs map[string]struct{}
+	terminalWindowOrder    []string
+
 	started  atomic.Bool
 	done     chan struct{}
 	doneOnce sync.Once
@@ -86,13 +93,14 @@ func New(opts Options) *Runtime {
 		panic("brickly: Options.BrickID is required")
 	}
 	p := &Runtime{
-		brickID:         opts.BrickID,
-		protocolVersion: firstNonEmpty(opts.ProtocolVersion, ProtocolVersion),
-		commandHandlers: make(map[string]CommandHandler),
-		cancelHandlers:  make(map[string]context.CancelFunc),
-		cancelled:       make(map[string]bool),
-		windows:         make(map[int64]*WindowHandle),
-		done:            make(chan struct{}),
+		brickID:                opts.BrickID,
+		protocolVersion:        firstNonEmpty(opts.ProtocolVersion, ProtocolVersion),
+		commandHandlers:        make(map[string]CommandHandler),
+		cancelHandlers:         make(map[string]context.CancelFunc),
+		cancelled:              make(map[string]bool),
+		windows:                make(map[int64]*WindowHandle),
+		terminalWindowEventIDs: make(map[string]struct{}),
+		done:                   make(chan struct{}),
 	}
 	p.transport = newTransport(transportOptions{
 		brickID:   opts.BrickID,
@@ -144,9 +152,28 @@ func (p *Runtime) Start() {
 	<-p.done
 }
 
-// Logf 写 stderr 日志。stdout 永远只写协议；Brick 身份由宿主日志中心附加。
-func (p *Runtime) Logf(format string, args ...any) {
-	p.transport.logf(format, args...)
+// Debug 发送 debug 级别结构化日志到宿主（runtime.log）。
+func (p *Runtime) Debug(message string, fields map[string]any) {
+	p.transport.sendLog("debug", message, fields, nil, nil)
+}
+
+// Info 发送 info 级别结构化日志到宿主（runtime.log）。
+func (p *Runtime) Info(message string, fields map[string]any) {
+	p.transport.sendLog("info", message, fields, nil, nil)
+}
+
+// Warn 发送 warn 级别结构化日志到宿主（runtime.log）。
+func (p *Runtime) Warn(message string, fields map[string]any) {
+	p.transport.sendLog("warn", message, fields, nil, nil)
+}
+
+// Error 发送 error 级别结构化日志到宿主（runtime.log）。
+func (p *Runtime) Error(message string, err error, fields map[string]any) {
+	var errPayload map[string]any
+	if err != nil {
+		errPayload = map[string]any{"code": "BRICK_ERROR", "message": err.Error()}
+	}
+	p.transport.sendLog("error", message, fields, errPayload, nil)
 }
 
 // BrickID 返回当前 Brick id。
@@ -167,7 +194,7 @@ func (p *Runtime) dispatch(msg rawMessage) {
 	case "runtime.shutdown":
 		p.handleShutdown()
 	default:
-		p.transport.logf("unknown message type: %s", msg.Type)
+		p.Warn("unknown BPP message type", map[string]any{"type": msg.Type})
 	}
 }
 
@@ -189,11 +216,11 @@ func (p *Runtime) handleHello(msg rawMessage) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					p.transport.logf("onReady panic: %v", r)
+					p.Error("onReady panic", fmt.Errorf("%v", r), nil)
 				}
 			}()
 			if err := fn(); err != nil {
-				p.transport.logf("onReady error: %v", err)
+				p.Error("onReady error", err, nil)
 			}
 		}()
 	}
@@ -223,7 +250,7 @@ func (p *Runtime) handleInvoke(msg rawMessage) {
 		return
 	}
 
-	ctx := newCommandContext(p, reqID, commandID)
+	ctx := newCommandContext(p, reqID, commandID, extractTrace(msg))
 	go func() {
 		defer p.finishInvoke(reqID)
 
@@ -278,6 +305,13 @@ func (p *Runtime) handleCancel(msg rawMessage) {
 func (p *Runtime) handleEventNotify(msg rawMessage) {
 	event, _ := msg.Raw["event"].(string)
 	payloadRaw := msg.Raw["payload"]
+	if event == "window.closed" {
+		if payload, ok := payloadRaw.(map[string]any); ok {
+			if eventID, ok := payload["eventId"].(string); ok && !p.rememberTerminalWindowEvent(eventID) {
+				return
+			}
+		}
+	}
 
 	// 路由 window.* 事件到具体 WindowHandle
 	if strings.HasPrefix(event, "window.") {
@@ -305,6 +339,7 @@ func (p *Runtime) handleShutdown() {
 }
 
 func (p *Runtime) runShutdown() {
+	p.clearWindows()
 	p.mu.RLock()
 	fn := p.shutdownHandler
 	p.mu.RUnlock()
@@ -312,11 +347,11 @@ func (p *Runtime) runShutdown() {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					p.transport.logf("onShutdown panic: %v", r)
+					p.Error("onShutdown panic", fmt.Errorf("%v", r), nil)
 				}
 			}()
 			if err := fn(); err != nil {
-				p.transport.logf("onShutdown error: %v", err)
+				p.Error("onShutdown error", err, nil)
 			}
 		}()
 	}
@@ -329,7 +364,45 @@ func (p *Runtime) runShutdown() {
 }
 
 func (p *Runtime) signalDone() {
+	p.clearWindows()
 	p.doneOnce.Do(func() { close(p.done) })
+}
+
+func (p *Runtime) removeWindow(windowID int64, expected *WindowHandle) {
+	p.windowsMu.Lock()
+	if p.windows[windowID] == expected {
+		delete(p.windows, windowID)
+	}
+	p.windowsMu.Unlock()
+}
+
+func (p *Runtime) clearWindows() {
+	p.windowsMu.Lock()
+	handles := make([]*WindowHandle, 0, len(p.windows))
+	for _, handle := range p.windows {
+		handles = append(handles, handle)
+	}
+	p.windows = make(map[int64]*WindowHandle)
+	p.windowsMu.Unlock()
+	for _, handle := range handles {
+		handle.disposeLocal("")
+	}
+}
+
+func (p *Runtime) rememberTerminalWindowEvent(eventID string) bool {
+	p.terminalWindowEventsMu.Lock()
+	defer p.terminalWindowEventsMu.Unlock()
+	if _, exists := p.terminalWindowEventIDs[eventID]; exists {
+		return false
+	}
+	p.terminalWindowEventIDs[eventID] = struct{}{}
+	p.terminalWindowOrder = append(p.terminalWindowOrder, eventID)
+	if len(p.terminalWindowOrder) > maxTerminalWindowEventIDs {
+		oldest := p.terminalWindowOrder[0]
+		p.terminalWindowOrder = p.terminalWindowOrder[1:]
+		delete(p.terminalWindowEventIDs, oldest)
+	}
+	return true
 }
 
 // —— 小工具 ——

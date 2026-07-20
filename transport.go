@@ -124,14 +124,14 @@ func (t *transport) readLoop() {
 		}
 		var raw map[string]any
 		if err := json.Unmarshal(line, &raw); err != nil {
-			t.logf("protocol error, drop line: %v", err)
+			t.sendLog("warn", "protocol error, drop line", map[string]any{"error": err.Error()}, nil, nil)
 			continue
 		}
 		msgType, _ := raw["type"].(string)
 		t.dispatch(rawMessage{Type: msgType, Raw: raw})
 	}
 	if err := scanner.Err(); err != nil {
-		t.logf("stdin scan error: %v", err)
+		t.sendLog("warn", "stdin scan error", map[string]any{"error": err.Error()}, nil, nil)
 	}
 	t.stop("stdin closed")
 	if t.onEnd != nil {
@@ -242,9 +242,29 @@ func (t *transport) flush() {
 	_ = t.stdoutBuf.Flush()
 }
 
-// logf 写 stderr 日志（stdout 永远只写协议；Brick 身份由宿主日志中心附加）。
+// logf 协议发送彻底失败时的兜底：不再写 stderr（宿主会按 stderr 通道收录）。
+// 业务与常规 SDK 诊断请走 sendLog；发送失败时静默丢弃。
 func (t *transport) logf(format string, args ...any) {
-	fmt.Fprintf(t.stderr, format+"\n", args...)
+	_ = format
+	_ = args
+	_ = t.stderr
+}
+
+// sendLog 发送 runtime.log BPP 消息到宿主，映射为当前 Trace 下的 Event。
+func (t *transport) sendLog(level string, message string, fields map[string]any, errPayload map[string]any, trace *TraceContext) {
+	msg := map[string]any{"type": "runtime.log", "level": level, "message": message}
+	if trace != nil {
+		if tm := trace.asMap(); tm != nil {
+			msg["trace"] = tm
+		}
+	}
+	if fields != nil {
+		msg["fields"] = fields
+	}
+	if errPayload != nil {
+		msg["error"] = errPayload
+	}
+	t.send(msg)
 }
 
 func (t *transport) nextID() string {

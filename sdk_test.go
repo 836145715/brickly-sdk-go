@@ -88,6 +88,13 @@ func writeLine(t *testing.T, w io.Writer, msg any) {
 	}
 }
 
+func windowCreateResult(id int64) map[string]any {
+	return map[string]any{
+		"windowKey": fmt.Sprintf("go-window-%d", id),
+		"windowId":  id, "webContentsId": id + 1000, "url": "x.html",
+	}
+}
+
 // 启动一个 Runtime 实例并返回 (brick, hostWriter, out, cleanup)。
 // hostWriter 写入的内容等价于宿主把消息喂给 runtime stdin。
 func newTestRuntime(t *testing.T, register func(p *Runtime)) (*Runtime, *bufio.Writer, *threadSafeBuffer) {
@@ -133,7 +140,7 @@ func TestHelloAndReady(t *testing.T) {
 	})
 
 	writeLine(t, in, map[string]any{
-		"type": "host.hello", "hostVersion": "test", "protocolVersion": "0.1.0",
+		"type": "host.hello", "hostVersion": "test", "protocolVersion": "0.2.0",
 	})
 	in.Flush()
 
@@ -165,19 +172,24 @@ func TestPingPong(t *testing.T) {
 	}
 }
 
-func TestLogfWritesPlainStderrWithoutBrickIDPrefix(t *testing.T) {
-	var stderr bytes.Buffer
+func TestInfoSendsRuntimeLogWithLevel(t *testing.T) {
+	var stdout bytes.Buffer
 	p := New(Options{
 		BrickID: "com.test",
 		Stdin:   strings.NewReader(""),
-		Stdout:  io.Discard,
-		Stderr:  &stderr,
+		Stdout:  &stdout,
+		Stderr:  io.Discard,
 	})
 
-	p.Logf("hello %s", "world")
+	p.Info("hello world", map[string]any{"k": 1})
 
-	if got, want := stderr.String(), "hello world\n"; got != want {
-		t.Fatalf("unexpected stderr: got %q want %q", got, want)
+	line := strings.TrimSpace(stdout.String())
+	var msg map[string]any
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		t.Fatalf("expected runtime.log json, got %q: %v", line, err)
+	}
+	if msg["type"] != "runtime.log" || msg["level"] != "info" || msg["message"] != "hello world" {
+		t.Fatalf("unexpected runtime.log: %+v", msg)
 	}
 }
 
@@ -251,7 +263,7 @@ func TestCommandNotFound(t *testing.T) {
 }
 
 // TestHostCallRouting 测试 hostCall 请求-响应配对：
-// SDK 发出 host.ui.createBrowserWindow，测试代码假装宿主回 host.result。
+// SDK 发出 host.ui.window.create，测试代码假装宿主回 host.result。
 func TestHostCallRouting(t *testing.T) {
 	type openResult struct {
 		handle *WindowHandle
@@ -271,10 +283,10 @@ func TestHostCallRouting(t *testing.T) {
 		resCh <- openResult{handle: h, err: err}
 	}()
 
-	// 读取 SDK 发出的 host.ui.createBrowserWindow
+	// 读取 SDK 发出的 host.ui.window.create
 	req := readNextLine(t, out, &consumed)
-	if req["type"] != "host.ui.createBrowserWindow" {
-		t.Fatalf("expected host.ui.createBrowserWindow, got %v", req["type"])
+	if req["type"] != "host.ui.window.create" {
+		t.Fatalf("expected host.ui.window.create, got %v", req["type"])
 	}
 	reqID, _ := req["id"].(string)
 	if reqID == "" {
@@ -285,7 +297,7 @@ func TestHostCallRouting(t *testing.T) {
 	writeLine(t, in, map[string]any{
 		"type":   "host.result",
 		"id":     reqID,
-		"result": map[string]any{"windowId": 42},
+		"result": windowCreateResult(42),
 	})
 	in.Flush()
 
@@ -302,7 +314,193 @@ func TestHostCallRouting(t *testing.T) {
 	}
 }
 
-// TestWindowHandleWrappers 快速验证若干白名单方法能正确序列化出 host.ui.callWindow。
+func registerTestWindow(p *Runtime, id int64) *WindowHandle {
+	handle := newWindowHandle(p, id)
+	p.windowsMu.Lock()
+	p.windows[id] = handle
+	p.windowsMu.Unlock()
+	return handle
+}
+
+func TestWindowCloseContractPreservesOrDisposesHandleByStatus(t *testing.T) {
+	statuses := []WindowCloseStatus{
+		WindowClosePending,
+		WindowClosePrevented,
+		WindowCloseClosed,
+		WindowCloseNotFound,
+	}
+	for index, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			p, in, out := newTestRuntime(t, nil)
+			writeLine(t, in, map[string]any{"type": "host.hello"})
+			in.Flush()
+			consumed := 0
+			_ = readNextLine(t, out, &consumed)
+			handle := registerTestWindow(p, int64(index+1))
+			handle.On("move", func(map[string]any) {})
+
+			type closeResult struct {
+				result WindowRequestCloseResult
+				err    error
+			}
+			done := make(chan closeResult, 1)
+			go func() {
+				result, err := handle.Close()
+				done <- closeResult{result: result, err: err}
+			}()
+
+			req := readNextLine(t, out, &consumed)
+			if req["type"] != "host.ui.window.requestClose" {
+				t.Fatalf("expected requestClose, got %+v", req)
+			}
+			writeLine(t, in, map[string]any{
+				"type": "host.result", "id": req["id"], "result": map[string]any{"status": status},
+			})
+			in.Flush()
+
+			got := <-done
+			if got.err != nil || got.result.Status != status {
+				t.Fatalf("unexpected close result: %+v err=%v", got.result, got.err)
+			}
+			terminal := status == WindowCloseClosed || status == WindowCloseNotFound
+			if handle.IsClosed() != terminal {
+				t.Fatalf("closed=%v, want %v", handle.IsClosed(), terminal)
+			}
+			p.windowsMu.RLock()
+			_, retained := p.windows[handle.ID]
+			p.windowsMu.RUnlock()
+			if retained == terminal {
+				t.Fatalf("retained=%v, terminal=%v", retained, terminal)
+			}
+			handle.handlersMu.RLock()
+			handlerCount := len(handle.handlers)
+			handle.handlersMu.RUnlock()
+			if (handlerCount > 0) == terminal {
+				t.Fatalf("handlerCount=%d, terminal=%v", handlerCount, terminal)
+			}
+		})
+	}
+}
+
+func TestWindowForceCloseUsesExplicitOperation(t *testing.T) {
+	p, in, out := newTestRuntime(t, nil)
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed)
+	handle := registerTestWindow(p, 20)
+	handle.On("move", func(map[string]any) {})
+
+	type forceResult struct {
+		result WindowTerminationResult
+		err    error
+	}
+	done := make(chan forceResult, 1)
+	go func() {
+		result, err := handle.ForceClose()
+		done <- forceResult{result: result, err: err}
+	}()
+	req := readNextLine(t, out, &consumed)
+	if req["type"] != "host.ui.window.forceClose" {
+		t.Fatalf("expected forceClose, got %+v", req)
+	}
+	writeLine(t, in, map[string]any{
+		"type": "host.result", "id": req["id"],
+		"result": map[string]any{"event": "sent", "window": "destroyed", "lifecycle": "released", "errors": []any{}},
+	})
+	in.Flush()
+	got := <-done
+	if got.err != nil || got.result.Window != WindowNativeDestroyed {
+		t.Fatalf("unexpected force result: %+v err=%v", got.result, got.err)
+	}
+	if !handle.IsClosed() {
+		t.Fatal("force close must dispose the local handle")
+	}
+}
+
+func TestWindowClosedEventIsDeduplicatedAndClearsReferences(t *testing.T) {
+	p := New(Options{BrickID: "com.test.window-event", Stdin: strings.NewReader("")})
+	handle := registerTestWindow(p, 30)
+	handleEvents := make(chan struct{}, 2)
+	runtimeEvents := make(chan struct{}, 2)
+	handle.On("closed", func(map[string]any) { handleEvents <- struct{}{} })
+	p.Events.On("window.closed", func(any, EventEnvelope) { runtimeEvents <- struct{}{} })
+	message := rawMessage{Type: "event.notify", Raw: map[string]any{
+		"type": "event.notify", "event": "window.closed",
+		"payload": map[string]any{
+			"eventId": "closed:go-window-30", "windowKey": "go-window-30", "windowId": float64(30),
+			"cause": "window-closed", "forced": false,
+		},
+	}}
+
+	p.handleEventNotify(message)
+	p.handleEventNotify(message)
+	select {
+	case <-handleEvents:
+	case <-time.After(time.Second):
+		t.Fatal("window handler was not called")
+	}
+	select {
+	case <-runtimeEvents:
+	case <-time.After(time.Second):
+		t.Fatal("runtime handler was not called")
+	}
+	time.Sleep(25 * time.Millisecond)
+	if len(handleEvents) != 0 || len(runtimeEvents) != 0 {
+		t.Fatal("duplicate eventId must not invoke callbacks twice")
+	}
+	p.windowsMu.RLock()
+	windowCount := len(p.windows)
+	p.windowsMu.RUnlock()
+	handle.handlersMu.RLock()
+	handlerCount := len(handle.handlers)
+	handle.handlersMu.RUnlock()
+	if windowCount != 0 || handlerCount != 0 || !handle.IsClosed() || handle.runtime != nil {
+		t.Fatalf("windowCount=%d handlerCount=%d closed=%v runtime=%v", windowCount, handlerCount, handle.IsClosed(), handle.runtime)
+	}
+}
+
+func TestTerminalWindowEventDedupIsBounded(t *testing.T) {
+	p := New(Options{BrickID: "com.test.window-dedup", Stdin: strings.NewReader("")})
+	for index := 0; index < maxTerminalWindowEventIDs+1; index++ {
+		p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+			"type": "event.notify", "event": "window.closed",
+			"payload": map[string]any{
+				"eventId":  fmt.Sprintf("closed:go-window-%d", index),
+				"windowId": float64(index),
+			},
+		}})
+	}
+	p.terminalWindowEventsMu.Lock()
+	count := len(p.terminalWindowEventIDs)
+	p.terminalWindowEventsMu.Unlock()
+	if count != maxTerminalWindowEventIDs {
+		t.Fatalf("dedup count=%d, want %d", count, maxTerminalWindowEventIDs)
+	}
+}
+
+func TestRuntimeEndDisposesAllWindowHandles(t *testing.T) {
+	p := New(Options{BrickID: "com.test.window-end", Stdin: strings.NewReader("")})
+	handle := registerTestWindow(p, 40)
+	handle.On("move", func(map[string]any) {})
+
+	p.signalDone()
+
+	p.windowsMu.RLock()
+	windowCount := len(p.windows)
+	p.windowsMu.RUnlock()
+	handle.handlersMu.RLock()
+	handlerCount := len(handle.handlers)
+	handle.handlersMu.RUnlock()
+	if windowCount != 0 || handlerCount != 0 || !handle.IsClosed() || handle.runtime != nil {
+		t.Fatalf("windowCount=%d handlerCount=%d closed=%v runtime=%v", windowCount, handlerCount, handle.IsClosed(), handle.runtime)
+	}
+	if ProtocolVersion != "0.2.0" {
+		t.Fatalf("ProtocolVersion=%s", ProtocolVersion)
+	}
+}
+
+// TestWindowHandleWrappers 快速验证若干白名单方法能正确序列化出 host.ui.window.call。
 func TestWindowHandleWrappers(t *testing.T) {
 	p, in, out := newTestRuntime(t, nil)
 	writeLine(t, in, map[string]any{"type": "host.hello"})
@@ -318,8 +516,8 @@ func TestWindowHandleWrappers(t *testing.T) {
 	go func() { done <- h.SetTitle("hello") }()
 
 	req := readNextLine(t, out, &consumed)
-	if req["type"] != "host.ui.callWindow" {
-		t.Fatalf("expected host.ui.callWindow, got %v", req["type"])
+	if req["type"] != "host.ui.window.call" {
+		t.Fatalf("expected host.ui.window.call, got %v", req["type"])
 	}
 	if req["method"] != "setTitle" {
 		t.Fatalf("expected method=setTitle, got %v", req["method"])
@@ -870,6 +1068,61 @@ func TestRuntimeOpenSession(t *testing.T) {
 	}
 }
 
+func TestRuntimeOpenSessionInvokeStreamOutsideCommandRequiresParent(t *testing.T) {
+	resCh := make(chan error, 1)
+
+	p, in, out := newTestRuntime(t, nil)
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	go func() {
+		session, err := p.OpenSession("com.target", WithSessionProfileID("work"))
+		if err != nil {
+			resCh <- err
+			return
+		}
+		events, errs := session.InvokeStream("run", map[string]any{"step": 1})
+		if _, ok := <-events; ok {
+			resCh <- fmt.Errorf("session.InvokeStream outside command produced an event")
+			return
+		}
+		if err, ok := <-errs; ok && err != nil {
+			resCh <- err
+			return
+		}
+		resCh <- fmt.Errorf("session.InvokeStream outside command did not return an error")
+	}()
+
+	openReq := readNextLine(t, out, &consumed)
+	if openReq["type"] != "host.session.open" {
+		t.Fatalf("expected host.session.open, got %v", openReq["type"])
+	}
+	writeLine(t, in, map[string]any{
+		"type": "host.result", "id": openReq["id"], "result": map[string]any{
+			"sessionId": "s1", "brickId": "com.target", "profileId": "work",
+		},
+	})
+	in.Flush()
+
+	if leaked, ok := readLineWithin(t, out, &consumed, 100*time.Millisecond); ok {
+		if id, _ := leaked["id"].(string); id != "" {
+			writeLine(t, in, map[string]any{"type": "host.result", "id": id, "result": nil})
+			in.Flush()
+			<-resCh
+		}
+		t.Fatalf("session.InvokeStream outside command leaked protocol message: %+v", leaked)
+	}
+
+	select {
+	case err := <-resCh:
+		assertBppErrorCode(t, err, "PARENT_INVOCATION_REQUIRED")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("session.InvokeStream outside command did not return quickly")
+	}
+}
+
 func TestCommandContextOpenSession(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
@@ -922,6 +1175,76 @@ func TestCommandContextOpenSession(t *testing.T) {
 	}
 }
 
+func TestCommandContextSessionInvokeStreamReceivesChunksAndResult(t *testing.T) {
+	p, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("session-stream-proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			session, err := ctx.OpenSession("com.target", WithSessionProfileID("work"))
+			if err != nil {
+				return nil, err
+			}
+			events, errs := session.InvokeStream("run", map[string]any{"text": "hi"})
+			got := []InvokeStreamEvent{}
+			for event := range events {
+				got = append(got, event)
+			}
+			if err, ok := <-errs; ok && err != nil {
+				return nil, err
+			}
+			return got, nil
+		})
+	})
+	_ = p
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-session-stream-1", "commandId": "session-stream-proxy", "input": nil,
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	openReq := readNextLine(t, out, &consumed)
+	if openReq["type"] != "host.session.open" || openReq["profileId"] != "work" {
+		t.Fatalf("unexpected session open: %+v", openReq)
+	}
+	writeLine(t, in, map[string]any{
+		"type": "host.result", "id": openReq["id"], "result": map[string]any{"sessionId": "s1", "brickId": "com.target"},
+	})
+	in.Flush()
+
+	invokeReq := readNextLine(t, out, &consumed)
+	if invokeReq["type"] != "host.session.invoke" {
+		t.Fatalf("expected host.session.invoke, got %v", invokeReq["type"])
+	}
+	if invokeReq["stream"] != true || invokeReq["parentRequestId"] != "cmd-session-stream-1" {
+		t.Fatalf("unexpected session stream invoke payload: %+v", invokeReq)
+	}
+	writeLine(t, in, map[string]any{
+		"type": "host.invoke.chunk", "id": invokeReq["id"], "name": "text", "chunk": "你",
+	})
+	writeLine(t, in, map[string]any{
+		"type": "host.result", "id": invokeReq["id"], "result": map[string]any{"text": "你好"},
+	})
+	in.Flush()
+
+	result := readNextLine(t, out, &consumed)
+	if result["type"] != "command.result" {
+		t.Fatalf("expected command.result, got %+v", result)
+	}
+	got := result["result"].([]any)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 stream events, got %+v", got)
+	}
+	first := got[0].(map[string]any)
+	if first["Type"] != "chunk" || first["Name"] != "text" || first["Chunk"] != "你" {
+		t.Fatalf("unexpected first chunk: %+v", first)
+	}
+	second := got[1].(map[string]any)
+	resultPayload := second["Result"].(map[string]any)
+	if second["Type"] != "result" || resultPayload["text"] != "你好" {
+		t.Fatalf("unexpected result event: %+v", second)
+	}
+}
+
 func TestRuntimeWebContentsSendOutsideCommandRequiresParent(t *testing.T) {
 	p, in, out := newTestRuntime(t, nil)
 	writeLine(t, in, map[string]any{"type": "host.hello"})
@@ -942,11 +1265,11 @@ func TestRuntimeWebContentsSendOutsideCommandRequiresParent(t *testing.T) {
 	}()
 
 	createReq := readNextLine(t, out, &consumed)
-	if createReq["type"] != "host.ui.createBrowserWindow" {
-		t.Fatalf("expected host.ui.createBrowserWindow, got %+v", createReq)
+	if createReq["type"] != "host.ui.window.create" {
+		t.Fatalf("expected host.ui.window.create, got %+v", createReq)
 	}
 	writeLine(t, in, map[string]any{
-		"type": "host.result", "id": createReq["id"], "result": map[string]any{"windowId": 99},
+		"type": "host.result", "id": createReq["id"], "result": windowCreateResult(99),
 	})
 	in.Flush()
 
@@ -1021,7 +1344,7 @@ func TestRuntimeWebContentsSendOutsideCommandUsesPayloadRequestID(t *testing.T) 
 
 	createReq := readNextLine(t, out, &consumed)
 	writeLine(t, in, map[string]any{
-		"type": "host.result", "id": createReq["id"], "result": map[string]any{"windowId": 99},
+		"type": "host.result", "id": createReq["id"], "result": windowCreateResult(99),
 	})
 	in.Flush()
 
@@ -1040,8 +1363,8 @@ func TestRuntimeWebContentsSendOutsideCommandUsesPayloadRequestID(t *testing.T) 
 	go func() { done <- win.WebContents().Send("ch", map[string]any{"requestId": "ui-req-1", "x": 1}) }()
 
 	req := readNextLine(t, out, &consumed)
-	if req["type"] != "host.ui.callWindow" || req["method"] != "webContents.send" {
-		t.Fatalf("expected host.ui.callWindow webContents.send, got %+v", req)
+	if req["type"] != "host.ui.window.call" || req["method"] != "webContents.send" {
+		t.Fatalf("expected host.ui.window.call webContents.send, got %+v", req)
 	}
 	if req["parentRequestId"] != "ui-req-1" {
 		t.Fatalf("expected parentRequestId ui-req-1, got %+v", req["parentRequestId"])
@@ -1086,16 +1409,16 @@ func TestCommandContextScopedUIWebContentsSendSendsParentOnlyForSend(t *testing.
 	_ = readNextLine(t, out, &consumed) // runtime.ready
 
 	createReq := readNextLine(t, out, &consumed)
-	if createReq["type"] != "host.ui.createBrowserWindow" {
-		t.Fatalf("expected host.ui.createBrowserWindow, got %+v", createReq)
+	if createReq["type"] != "host.ui.window.create" {
+		t.Fatalf("expected host.ui.window.create, got %+v", createReq)
 	}
 	writeLine(t, in, map[string]any{
-		"type": "host.result", "id": createReq["id"], "result": map[string]any{"windowId": 101},
+		"type": "host.result", "id": createReq["id"], "result": windowCreateResult(101),
 	})
 	in.Flush()
 
 	sendReq := readNextLine(t, out, &consumed)
-	if sendReq["type"] != "host.ui.callWindow" || sendReq["method"] != "webContents.send" {
+	if sendReq["type"] != "host.ui.window.call" || sendReq["method"] != "webContents.send" {
 		t.Fatalf("expected webContents.send callWindow, got %+v", sendReq)
 	}
 	if sendReq["parentRequestId"] != "cmd-window-1" {
@@ -1105,7 +1428,7 @@ func TestCommandContextScopedUIWebContentsSendSendsParentOnlyForSend(t *testing.
 	in.Flush()
 
 	scriptReq := readNextLine(t, out, &consumed)
-	if scriptReq["type"] != "host.ui.callWindow" || scriptReq["method"] != "webContents.executeJavaScript" {
+	if scriptReq["type"] != "host.ui.window.call" || scriptReq["method"] != "webContents.executeJavaScript" {
 		t.Fatalf("expected webContents.executeJavaScript callWindow, got %+v", scriptReq)
 	}
 	if _, ok := scriptReq["parentRequestId"]; ok {
@@ -1115,7 +1438,7 @@ func TestCommandContextScopedUIWebContentsSendSendsParentOnlyForSend(t *testing.
 	in.Flush()
 
 	titleReq := readNextLine(t, out, &consumed)
-	if titleReq["type"] != "host.ui.callWindow" || titleReq["method"] != "setTitle" {
+	if titleReq["type"] != "host.ui.window.call" || titleReq["method"] != "setTitle" {
 		t.Fatalf("expected setTitle callWindow, got %+v", titleReq)
 	}
 	if _, ok := titleReq["parentRequestId"]; ok {
@@ -1173,10 +1496,10 @@ func TestEventHandlerCanHostCall(t *testing.T) {
 	})
 	in.Flush()
 
-	// SDK 在 handler 内会发出 host.ui.callWindow getTitle，测试回 result
+	// SDK 在 handler 内会发出 host.ui.window.call getTitle，测试回 result
 	req := readNextLine(t, out, &consumed)
-	if req["type"] != "host.ui.callWindow" || req["method"] != "getTitle" {
-		t.Fatalf("expected host.ui.callWindow getTitle, got %+v", req)
+	if req["type"] != "host.ui.window.call" || req["method"] != "getTitle" {
+		t.Fatalf("expected host.ui.window.call getTitle, got %+v", req)
 	}
 	writeLine(t, in, map[string]any{
 		"type": "host.result", "id": req["id"], "result": "hello",
@@ -1232,10 +1555,10 @@ func TestShutdownHandlerCanHostCall(t *testing.T) {
 	writeLine(t, in, map[string]any{"type": "runtime.shutdown"})
 	in.Flush()
 
-	// SDK 在 shutdown handler 内会发出 host.ui.listWindows，测试回 result
+	// SDK 在 shutdown handler 内会发出 host.ui.window.list，测试回 result
 	req := readNextLine(t, out, &consumed)
-	if req["type"] != "host.ui.listWindows" {
-		t.Fatalf("expected host.ui.listWindows, got %+v", req)
+	if req["type"] != "host.ui.window.list" {
+		t.Fatalf("expected host.ui.window.list, got %+v", req)
 	}
 	writeLine(t, in, map[string]any{
 		"type": "host.result", "id": req["id"], "result": []any{},
@@ -1312,5 +1635,137 @@ func TestWhitelistMatchesSchema(t *testing.T) {
 		if !seen[m] {
 			t.Errorf("schema has %q but SDK doesn't", m)
 		}
+	}
+}
+
+// —— Trace 传播测试 ——
+
+// TestTracePropagationWithTrace 验证 command.invoke 携带 trace 时，
+// handler 内的 host.* 调用自动合并 trace 字段。
+func TestTracePropagationWithTrace(t *testing.T) {
+	p, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("work", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			// 通过 ctx.System() 发起 host.* 调用，应自动携带 trace
+			_, err := ctx.System().GetAppName()
+			return map[string]any{"ok": true}, err
+		})
+	})
+	_ = p
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type":      "command.invoke",
+		"id":        "cmd-trace-1",
+		"commandId": "work",
+		"input":     nil,
+		"trace": map[string]any{
+			"traceId":      "trace-abc-123",
+			"parentSpanId": "span-xyz",
+		},
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	// 读取 host.platform.system.getAppName 请求
+	req := readNextLine(t, out, &consumed)
+	if req["type"] != "host.platform.system.getAppName" {
+		t.Fatalf("expected host.platform.system.getAppName, got %v", req["type"])
+	}
+	trace, ok := req["trace"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected trace field in host.* request, got: %+v", req)
+	}
+	if trace["traceId"] != "trace-abc-123" {
+		t.Fatalf("expected traceId=trace-abc-123, got %v", trace["traceId"])
+	}
+	if trace["parentSpanId"] != "span-xyz" {
+		t.Fatalf("expected parentSpanId=span-xyz, got %v", trace["parentSpanId"])
+	}
+	writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": "Brickly"})
+	in.Flush()
+
+	result := readNextLine(t, out, &consumed)
+	if result["type"] != "command.result" {
+		t.Fatalf("expected command.result, got %v", result["type"])
+	}
+}
+
+// TestTracePropagationWithoutTrace 验证 command.invoke 不携带 trace 时，
+// handler 内的 host.* 调用不会添加 trace 字段。
+func TestTracePropagationWithoutTrace(t *testing.T) {
+	p, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("work", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			_, err := ctx.System().GetAppName()
+			return map[string]any{"ok": true}, err
+		})
+	})
+	_ = p
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type":      "command.invoke",
+		"id":        "cmd-trace-2",
+		"commandId": "work",
+		"input":     nil,
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	req := readNextLine(t, out, &consumed)
+	if req["type"] != "host.platform.system.getAppName" {
+		t.Fatalf("expected host.platform.system.getAppName, got %v", req["type"])
+	}
+	if _, ok := req["trace"]; ok {
+		t.Fatalf("expected no trace field, but got: %+v", req["trace"])
+	}
+	writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": "Brickly"})
+	in.Flush()
+
+	result := readNextLine(t, out, &consumed)
+	if result["type"] != "command.result" {
+		t.Fatalf("expected command.result, got %v", result["type"])
+	}
+}
+
+// TestTracePropagationInvoke 验证 CommandContext.Invoke 传播 trace 到 host.invoke 消息。
+func TestTracePropagationInvoke(t *testing.T) {
+	p, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("caller", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			err := ctx.Invoke("com.test.target", "echo", map[string]any{"x": 1}, nil)
+			return map[string]any{"ok": true}, err
+		})
+	})
+	_ = p
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type":      "command.invoke",
+		"id":        "cmd-trace-3",
+		"commandId": "caller",
+		"input":     nil,
+		"trace": map[string]any{
+			"traceId": "trace-invoke-456",
+		},
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	req := readNextLine(t, out, &consumed)
+	if req["type"] != "host.invoke" {
+		t.Fatalf("expected host.invoke, got %v", req["type"])
+	}
+	trace, ok := req["trace"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected trace field in host.invoke, got: %+v", req)
+	}
+	if trace["traceId"] != "trace-invoke-456" {
+		t.Fatalf("expected traceId=trace-invoke-456, got %v", trace["traceId"])
+	}
+	writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": map[string]any{"ok": true}})
+	in.Flush()
+
+	result := readNextLine(t, out, &consumed)
+	if result["type"] != "command.result" {
+		t.Fatalf("expected command.result, got %v", result["type"])
 	}
 }

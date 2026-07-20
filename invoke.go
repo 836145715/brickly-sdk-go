@@ -8,6 +8,7 @@ type InvokeOption func(*invokeOptions)
 type invokeOptions struct {
 	profileID       string
 	parentRequestID string
+	trace           *TraceContext
 }
 
 // WithProfileID 指定目标 Brick 的 Profile ID。
@@ -61,6 +62,9 @@ func (p *Runtime) invokeWithType(msgType, brickID, commandID string, input any, 
 	if options.parentRequestID != "" {
 		msg["parentRequestId"] = options.parentRequestID
 	}
+	if tm := options.trace.asMap(); tm != nil {
+		msg["trace"] = tm
+	}
 	return p.transport.hostCall(msg, into)
 }
 
@@ -87,13 +91,9 @@ func (p *Runtime) InvokeStream(brickID, commandID string, input any, opts ...Inv
 }
 
 func (p *Runtime) invokeStreamWithOptions(brickID, commandID string, input any, options invokeOptions) (<-chan InvokeStreamEvent, <-chan error) {
-	id := p.transport.nextID()
-	events := make(chan InvokeStreamEvent, 16)
-	errs := make(chan error, 1)
-	stream := p.transport.registerStream(id)
 	msg := map[string]any{
 		"type":      "host.invoke",
-		"id":        id,
+		"id":        p.transport.nextID(),
 		"brickId":   brickID,
 		"commandId": commandID,
 		"input":     input,
@@ -105,6 +105,17 @@ func (p *Runtime) invokeStreamWithOptions(brickID, commandID string, input any, 
 	if options.parentRequestID != "" {
 		msg["parentRequestId"] = options.parentRequestID
 	}
+	if tm := options.trace.asMap(); tm != nil {
+		msg["trace"] = tm
+	}
+	return p.invokeStreamMessage(msg)
+}
+
+func (p *Runtime) invokeStreamMessage(msg map[string]any) (<-chan InvokeStreamEvent, <-chan error) {
+	id, _ := msg["id"].(string)
+	events := make(chan InvokeStreamEvent, 16)
+	errs := make(chan error, 1)
+	stream := p.transport.registerStream(id)
 	p.transport.send(msg)
 	go func() {
 		defer close(events)
