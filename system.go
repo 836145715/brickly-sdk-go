@@ -23,13 +23,6 @@ const (
 	SystemPathCrashDumps  SystemPathName = "crashDumps"
 )
 
-// PlatformAPI 汇总宿主平台能力。当前 Go SDK 先暴露 System，与 Node SDK 的
-// brick.platform.system / ctx.platform.system 对齐。
-type PlatformAPI struct {
-	System    *SystemAPI
-	Clipboard *ClipboardAPI
-}
-
 // ClipboardContent 是 host.platform.clipboard.setContent 的输入。
 // 常见形态：{"kind":"text","text":"hello"}、{"kind":"file","paths":[]}
 // 或 {"kind":"image","path":"..."}。宿主负责按 manifest 校验 os.clipboard 权限。

@@ -6,9 +6,10 @@ import "context"
 // CommandContext，但用 Go 惯用法：Context() 返回 context.Context 用于取消；
 // IsCancelled() 提供协作式取消轮询。
 type CommandContext struct {
-	RequestID string
-	CommandID string
-	Trace     *TraceContext
+	RequestID  string
+	CommandID  string
+	Invocation CommandInvocationContext
+	Trace      *TraceContext
 
 	runtime *Runtime
 	ctx     context.Context
@@ -18,18 +19,25 @@ type CommandContext struct {
 	system   *SystemAPI
 }
 
-func newCommandContext(p *Runtime, reqID, commandID string, trace *TraceContext) *CommandContext {
+func newCommandContext(
+	p *Runtime,
+	reqID string,
+	commandID string,
+	invocation CommandInvocationContext,
+	trace *TraceContext,
+) *CommandContext {
 	ctx, cancel := context.WithCancel(context.Background())
-	system := &SystemAPI{runtime: p, trace: trace}
+	platform := newPlatformAPI(p, trace)
 	c := &CommandContext{
-		RequestID: reqID,
-		CommandID: commandID,
-		Trace:     trace,
-		runtime:   p,
-		ctx:       ctx,
-		cancel:    cancel,
-		platform:  &PlatformAPI{System: system, Clipboard: &ClipboardAPI{runtime: p, trace: trace}},
-		system:    system,
+		RequestID:  reqID,
+		CommandID:  commandID,
+		Invocation: invocation,
+		Trace:      trace,
+		runtime:    p,
+		ctx:        ctx,
+		cancel:     cancel,
+		platform:   platform,
+		system:     platform.System,
 	}
 	p.cancelMu.Lock()
 	p.cancelHandlers[reqID] = cancel
@@ -126,16 +134,30 @@ func (c *CommandContext) Error(message string, err error, fields map[string]any)
 	c.runtime.transport.sendLog("error", message, fields, errPayload, c.Trace)
 }
 
+func (c *CommandContext) applyInvokeContext(brickID string, options *invokeOptions) {
+	if options.profileID == "" {
+		options.profileID = c.Invocation.DependencyProfiles[brickID]
+	}
+	options.parentRequestID = c.RequestID
+	options.trace = c.Trace
+}
+
 // Invoke 跨 Brick 调用命令。宿主会自动管理目标 Brick 实例生命周期。
 func (c *CommandContext) Invoke(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
 	if !c.runtime.isCommandActive(c.RequestID) {
 		return parentInvocationRequired("Invoke must run inside an active command handler")
 	}
 	opts = append(opts, func(options *invokeOptions) {
-		options.parentRequestID = c.RequestID
-		options.trace = c.Trace
+		c.applyInvokeContext(brickID, options)
 	})
 	return c.runtime.Invoke(brickID, commandID, input, into, opts...)
+}
+
+// InvokeRoot 发起独立 root 调用，并携带当前 command request id 供宿主审计。
+func (c *CommandContext) InvokeRoot(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
+	options := collectInvokeOptions(opts)
+	c.applyInvokeContext(brickID, &options)
+	return c.runtime.invokeWithType("host.invokeRoot", brickID, commandID, input, into, options)
 }
 
 // InvokeStream 跨 Brick 流式调用命令。
@@ -144,8 +166,7 @@ func (c *CommandContext) InvokeStream(brickID, commandID string, input any, opts
 		return failedInvokeStream(parentInvocationRequired("InvokeStream must run inside an active command handler"))
 	}
 	opts = append(opts, func(options *invokeOptions) {
-		options.parentRequestID = c.RequestID
-		options.trace = c.Trace
+		c.applyInvokeContext(brickID, options)
 	})
 	return c.runtime.InvokeStream(brickID, commandID, input, opts...)
 }
@@ -156,6 +177,9 @@ func (c *CommandContext) OpenSession(brickID string, opts ...SessionOption) (*Br
 		return nil, parentInvocationRequired("OpenSession must run inside an active command handler")
 	}
 	opts = append(opts, func(options *sessionOptions) {
+		if options.profileID == "" {
+			options.profileID = c.Invocation.DependencyProfiles[brickID]
+		}
 		options.parentRequestID = c.RequestID
 		options.trace = c.Trace
 	})

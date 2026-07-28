@@ -193,6 +193,62 @@ func TestInfoSendsRuntimeLogWithLevel(t *testing.T) {
 	}
 }
 
+// @capability transport.host_disconnect
+func TestTransportHostDisconnectRejectsPendingCalls(t *testing.T) {
+	t.Run("host call", func(t *testing.T) {
+		stdinR, stdinW := io.Pipe()
+		out := &threadSafeBuffer{}
+		transport := newTransport(transportOptions{
+			brickID: "com.test", stdin: stdinR, stdout: out, stderr: io.Discard,
+		})
+		transport.start()
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- transport.hostCall(map[string]any{"type": "host.platform.system.getAppName"}, nil)
+		}()
+		consumed := 0
+		_ = readNextLine(t, out, &consumed)
+		_ = stdinW.Close()
+
+		select {
+		case err := <-errCh:
+			assertBppErrorCode(t, err, "PROCESS_EXITED")
+		case <-time.After(time.Second):
+			t.Fatal("pending host call was not rejected after disconnect")
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		stdinR, stdinW := io.Pipe()
+		out := &threadSafeBuffer{}
+		transport := newTransport(transportOptions{
+			brickID: "com.test", stdin: stdinR, stdout: out, stderr: io.Discard,
+		})
+		transport.start()
+		id := transport.nextID()
+		events := transport.registerStream(id)
+		transport.send(map[string]any{
+			"type": "host.invoke", "id": id, "brickId": "com.target", "commandId": "run", "stream": true,
+		})
+		consumed := 0
+		_ = readNextLine(t, out, &consumed)
+		_ = stdinW.Close()
+
+		select {
+		case event := <-events:
+			if event.Type != "host.error" {
+				t.Fatalf("expected host.error, got %+v", event)
+			}
+			errorPayload := event.Raw["error"].(map[string]any)
+			if errorPayload["code"] != "PROCESS_EXITED" {
+				t.Fatalf("unexpected stream error: %+v", errorPayload)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("pending stream was not rejected after disconnect")
+		}
+	})
+}
+
 func TestCommandInvokeResult(t *testing.T) {
 	_, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("echo", func(ctx *CommandContext, input json.RawMessage) (any, error) {
@@ -219,6 +275,49 @@ func TestCommandInvokeResult(t *testing.T) {
 	// 顺序：progress, output, result
 	if got[0] != "command.progress" || got[1] != "command.output" || got[2] != "command.result" {
 		t.Fatalf("unexpected message order: %v", got)
+	}
+}
+
+// @capability command.progress_chunk_output
+func TestCommandProgressChunkOutput(t *testing.T) {
+	_, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("stream", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			ctx.Progress(0.5, "half")
+			ctx.Chunk("text", "piece")
+			ctx.Output("summary", map[string]any{"ok": true})
+			return nil, nil
+		})
+	})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "req-stream", "commandId": "stream", "input": nil,
+	})
+	in.Flush()
+	consumed := 0
+	progress := readNextLine(t, out, &consumed)
+	chunk := readNextLine(t, out, &consumed)
+	output := readNextLine(t, out, &consumed)
+
+	if progress["type"] != "command.progress" || progress["id"] != "req-stream" || progress["progress"] != 0.5 {
+		t.Fatalf("unexpected progress: %+v", progress)
+	}
+	if chunk["type"] != "command.chunk" || chunk["name"] != "text" || chunk["chunk"] != "piece" {
+		t.Fatalf("unexpected chunk: %+v", chunk)
+	}
+	if output["type"] != "command.output" || output["name"] != "summary" {
+		t.Fatalf("unexpected output: %+v", output)
+	}
+}
+
+// @capability exports.public_surface
+func TestPublicSurfaceExposesRuntimeAPIs(t *testing.T) {
+	p := New(Options{
+		BrickID: "com.test", Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard,
+	})
+	if p.UI == nil || p.Events == nil || p.Platform == nil || p.System == nil {
+		t.Fatalf("missing runtime APIs: %+v", p)
+	}
+	if p.Platform.System != p.System || p.Platform.Clipboard == nil || p.Platform.Screen == nil || p.Platform.Input == nil || p.Platform.Screenshot == nil {
+		t.Fatalf("incomplete platform surface: %+v", p.Platform)
 	}
 }
 
@@ -663,7 +762,7 @@ func TestRuntimeInvokeStreamOutsideCommandRequiresParent(t *testing.T) {
 func TestCommandContextInvokeStreamReceivesChunksAndResult(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("stream-proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			events, errs := ctx.InvokeStream("com.target", "run", map[string]any{"text": "hi"}, WithProfileID("work"))
+			events, errs := ctx.InvokeStream("com.target", "run", map[string]any{"text": "hi"})
 			got := []InvokeStreamEvent{}
 			for event := range events {
 				got = append(got, event)
@@ -678,6 +777,9 @@ func TestCommandContextInvokeStreamReceivesChunksAndResult(t *testing.T) {
 	writeLine(t, in, map[string]any{"type": "host.hello"})
 	writeLine(t, in, map[string]any{
 		"type": "command.invoke", "id": "cmd-stream-1", "commandId": "stream-proxy", "input": nil,
+		"invocation": map[string]any{
+			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "work"},
+		},
 	})
 	in.Flush()
 	consumed := 0
@@ -730,33 +832,53 @@ func TestCommandContextInvokeStreamReceivesChunksAndResult(t *testing.T) {
 func TestCommandContextInvoke(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			var result map[string]any
-			if err := ctx.Invoke("com.target", "run", nil, &result, WithProfileID("work")); err != nil {
+			var automatic map[string]any
+			if err := ctx.Invoke("com.target", "automatic", nil, &automatic); err != nil {
 				return nil, err
 			}
-			return result, nil
+			var manual map[string]any
+			if err := ctx.Invoke("com.target", "manual", nil, &manual, WithProfileID("manual-work")); err != nil {
+				return nil, err
+			}
+			return map[string]any{"automatic": automatic, "manual": manual}, nil
 		})
 	})
 	_ = p
 	writeLine(t, in, map[string]any{"type": "host.hello"})
-	writeLine(t, in, map[string]any{"type": "command.invoke", "id": "cmd-1", "commandId": "proxy", "input": nil})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-1", "commandId": "proxy", "input": nil,
+		"invocation": map[string]any{
+			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "dep-work"},
+		},
+	})
 	in.Flush()
 	consumed := 0
 	_ = readNextLine(t, out, &consumed) // runtime.ready
 
-	req := readNextLine(t, out, &consumed)
-	if req["type"] != "host.invoke" {
-		t.Fatalf("expected host.invoke, got %v", req["type"])
+	automaticReq := readNextLine(t, out, &consumed)
+	if automaticReq["type"] != "host.invoke" || automaticReq["commandId"] != "automatic" {
+		t.Fatalf("expected automatic host.invoke, got %+v", automaticReq)
 	}
-	if req["profileId"] != "work" {
-		t.Fatalf("expected profileId=work, got %v", req["profileId"])
+	if automaticReq["profileId"] != "dep-work" {
+		t.Fatalf("expected dependency profile dep-work, got %+v", automaticReq)
 	}
-	if req["parentRequestId"] != "cmd-1" {
-		t.Fatalf("expected parentRequestId=cmd-1, got %+v", req)
+	if automaticReq["parentRequestId"] != "cmd-1" {
+		t.Fatalf("expected parentRequestId=cmd-1, got %+v", automaticReq)
 	}
-
 	writeLine(t, in, map[string]any{
-		"type": "host.result", "id": req["id"], "result": map[string]any{"proxied": true},
+		"type": "host.result", "id": automaticReq["id"], "result": map[string]any{"profile": "automatic"},
+	})
+	in.Flush()
+
+	manualReq := readNextLine(t, out, &consumed)
+	if manualReq["type"] != "host.invoke" || manualReq["commandId"] != "manual" {
+		t.Fatalf("expected manual host.invoke, got %+v", manualReq)
+	}
+	if manualReq["profileId"] != "manual-work" {
+		t.Fatalf("expected explicit profile manual-work, got %+v", manualReq)
+	}
+	writeLine(t, in, map[string]any{
+		"type": "host.result", "id": manualReq["id"], "result": map[string]any{"profile": "manual"},
 	})
 	in.Flush()
 
@@ -765,8 +887,87 @@ func TestCommandContextInvoke(t *testing.T) {
 		t.Fatalf("expected command.result, got %+v", result)
 	}
 	got := result["result"].(map[string]any)
-	if got["proxied"] != true {
+	if got["automatic"].(map[string]any)["profile"] != "automatic" || got["manual"].(map[string]any)["profile"] != "manual" {
 		t.Fatalf("unexpected command result: %+v", got)
+	}
+}
+
+// @capability command.invocation_context
+func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
+	p, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("inspect", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			return ctx.Invocation, nil
+		})
+	})
+	_ = p
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-invocation-1", "commandId": "inspect", "input": nil,
+		"invocation": map[string]any{
+			"source": "hotkey", "triggerId": "open", "hotkeyId": "brick:open", "profileId": "work",
+			"dependencyProfiles": map[string]any{"com.target": "dep-work"},
+			"binding":            map[string]any{"kind": "accelerator", "accelerator": "Alt+O"},
+		},
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	result := readNextLine(t, out, &consumed)
+	invocation := result["result"].(map[string]any)
+	if invocation["source"] != "hotkey" || invocation["triggerId"] != "open" || invocation["profileId"] != "work" {
+		t.Fatalf("unexpected invocation context: %+v", invocation)
+	}
+	if invocation["dependencyProfiles"].(map[string]any)["com.target"] != "dep-work" {
+		t.Fatalf("unexpected dependency profiles: %+v", invocation)
+	}
+
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-invocation-2", "commandId": "inspect", "input": nil,
+	})
+	in.Flush()
+	defaultResult := readNextLine(t, out, &consumed)
+	defaultInvocation := defaultResult["result"].(map[string]any)
+	if defaultInvocation["source"] != "unknown" {
+		t.Fatalf("expected default invocation source unknown, got %+v", defaultInvocation)
+	}
+}
+
+// @capability invoke.root
+func TestCommandContextInvokeRootPropagatesAuditParent(t *testing.T) {
+	p, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("root-proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			var result map[string]any
+			if err := ctx.InvokeRoot("com.target", "run", nil, &result); err != nil {
+				return nil, err
+			}
+			return result, nil
+		})
+	})
+	_ = p
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-root-1", "commandId": "root-proxy", "input": nil,
+		"invocation": map[string]any{
+			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "dep-work"},
+		},
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed) // runtime.ready
+
+	req := readNextLine(t, out, &consumed)
+	if req["type"] != "host.invokeRoot" || req["profileId"] != "dep-work" || req["parentRequestId"] != "cmd-root-1" {
+		t.Fatalf("unexpected command-scoped invokeRoot: %+v", req)
+	}
+	writeLine(t, in, map[string]any{
+		"type": "host.result", "id": req["id"], "result": map[string]any{"rooted": true},
+	})
+	in.Flush()
+
+	result := readNextLine(t, out, &consumed)
+	if result["type"] != "command.result" || result["result"].(map[string]any)["rooted"] != true {
+		t.Fatalf("unexpected command result: %+v", result)
 	}
 }
 
@@ -828,6 +1029,230 @@ func TestClipboardAPISendsHostPlatformClipboardMessages(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("clipboard API calls did not return")
+	}
+}
+
+// @capability platform.screen_input_screenshot
+func TestScreenInputAndScreenshotAPISendHostPlatformMessages(t *testing.T) {
+	done := make(chan error, 1)
+	var region ScreenshotResult
+	var capture ScreenCaptureResult
+	var color ScreenColorPickResult
+	var primary ScreenDisplay
+	var displays []ScreenDisplay
+	var cursor ScreenPoint
+	var nearest ScreenDisplay
+	var matching ScreenDisplay
+	var dipPoint ScreenPoint
+	var screenPoint ScreenPoint
+	var dipRect ScreenRect
+	var screenRect ScreenRect
+	var sources []DesktopCaptureSource
+
+	p, in, out := newTestRuntime(t, nil)
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed)
+
+	go func() {
+		var err error
+		region, err = p.Platform.Screenshot.SelectRegion(ScreenshotRegionOptions{"prompt": "select"})
+		if err != nil {
+			done <- err
+			return
+		}
+		capture, err = p.Platform.Screen.CaptureRegion(ScreenCaptureOptions{"format": "dataUrl"})
+		if err != nil {
+			done <- err
+			return
+		}
+		color, err = p.Platform.Screen.PickColor(ScreenColorPickOptions{"timeoutMs": 5000})
+		if err != nil {
+			done <- err
+			return
+		}
+		primary, err = p.Platform.Screen.GetPrimaryDisplay()
+		if err != nil {
+			done <- err
+			return
+		}
+		displays, err = p.Platform.Screen.GetAllDisplays()
+		if err != nil {
+			done <- err
+			return
+		}
+		cursor, err = p.Platform.Screen.GetCursorScreenPoint()
+		if err != nil {
+			done <- err
+			return
+		}
+		nearest, err = p.Platform.Screen.GetDisplayNearestPoint(ScreenPoint{X: 10, Y: 20})
+		if err != nil {
+			done <- err
+			return
+		}
+		matching, err = p.Platform.Screen.GetDisplayMatching(ScreenRect{X: 1, Y: 2, Width: 300, Height: 200})
+		if err != nil {
+			done <- err
+			return
+		}
+		dipPoint, err = p.Platform.Screen.ScreenToDIPPoint(ScreenPoint{X: 100, Y: 200})
+		if err != nil {
+			done <- err
+			return
+		}
+		screenPoint, err = p.Platform.Screen.DIPToScreenPoint(ScreenPoint{X: 50, Y: 60})
+		if err != nil {
+			done <- err
+			return
+		}
+		dipRect, err = p.Platform.Screen.ScreenToDIPRect(ScreenRect{X: 1, Y: 2, Width: 3, Height: 4})
+		if err != nil {
+			done <- err
+			return
+		}
+		screenRect, err = p.Platform.Screen.DIPToScreenRect(ScreenRect{X: 5, Y: 6, Width: 7, Height: 8})
+		if err != nil {
+			done <- err
+			return
+		}
+		sources, err = p.Platform.Screen.DesktopCaptureSources(DesktopCaptureOptions{"types": []string{"window"}})
+		if err != nil {
+			done <- err
+			return
+		}
+		if err = p.Platform.Input.KeyboardTap(KeyboardTapPayload{Key: "A", Modifiers: []string{"control"}}); err != nil {
+			done <- err
+			return
+		}
+		if err = p.Platform.Input.MouseMove(ScreenPoint{X: 11, Y: 12}); err != nil {
+			done <- err
+			return
+		}
+		if err = p.Platform.Input.MouseClick(ScreenPoint{X: 21, Y: 22}); err != nil {
+			done <- err
+			return
+		}
+		if err = p.Platform.Input.MouseDoubleClick(ScreenPoint{X: 31, Y: 32}); err != nil {
+			done <- err
+			return
+		}
+		done <- p.Platform.Input.MouseRightClick(ScreenPoint{X: 41, Y: 42})
+	}()
+
+	resolve := func(expectedType string, assertPayload func(map[string]any), result any) {
+		req := readNextLine(t, out, &consumed)
+		if req["type"] != expectedType {
+			t.Fatalf("expected %s, got %+v", expectedType, req)
+		}
+		if assertPayload != nil {
+			assertPayload(req)
+		}
+		writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": result})
+		in.Flush()
+	}
+
+	resolve("host.platform.screenshot.selectRegion", func(req map[string]any) {
+		if req["options"].(map[string]any)["prompt"] != "select" {
+			t.Fatalf("unexpected screenshot options: %+v", req)
+		}
+	}, map[string]any{"ok": true})
+	resolve("host.platform.screen.captureRegion", func(req map[string]any) {
+		if req["options"].(map[string]any)["format"] != "dataUrl" {
+			t.Fatalf("unexpected capture options: %+v", req)
+		}
+	}, map[string]any{"dataUrl": "data:image/png;base64,eA=="})
+	resolve("host.platform.screen.pickColor", nil, map[string]any{"hex": "#ffffff", "rgb": "rgb(255,255,255)"})
+	resolve("host.platform.screen.getPrimaryDisplay", nil, map[string]any{"id": 1, "label": "primary"})
+	resolve("host.platform.screen.getAllDisplays", nil, []any{map[string]any{"id": 1}, map[string]any{"id": 2}})
+	resolve("host.platform.screen.getCursorScreenPoint", nil, map[string]any{"x": 7, "y": 8})
+	resolve("host.platform.screen.getDisplayNearestPoint", func(req map[string]any) {
+		point := req["point"].(map[string]any)
+		if point["x"] != float64(10) || point["y"] != float64(20) {
+			t.Fatalf("unexpected nearest point: %+v", point)
+		}
+	}, map[string]any{"id": 2})
+	resolve("host.platform.screen.getDisplayMatching", nil, map[string]any{"id": 3})
+	resolve("host.platform.screen.screenToDipPoint", nil, map[string]any{"x": 50, "y": 100})
+	resolve("host.platform.screen.dipToScreenPoint", nil, map[string]any{"x": 100, "y": 120})
+	resolve("host.platform.screen.screenToDipRect", nil, map[string]any{"x": 1, "y": 1, "width": 2, "height": 2})
+	resolve("host.platform.screen.dipToScreenRect", nil, map[string]any{"x": 10, "y": 12, "width": 14, "height": 16})
+	resolve("host.platform.screen.desktopCaptureSources", func(req map[string]any) {
+		types := req["options"].(map[string]any)["types"].([]any)
+		if len(types) != 1 || types[0] != "window" {
+			t.Fatalf("unexpected desktop capture options: %+v", req)
+		}
+	}, []any{map[string]any{"id": "window:1", "name": "Editor"}})
+	resolve("host.platform.input.keyboardTap", func(req map[string]any) {
+		payload := req["payload"].(map[string]any)
+		if payload["key"] != "A" {
+			t.Fatalf("unexpected keyboard payload: %+v", payload)
+		}
+	}, nil)
+	resolve("host.platform.input.mouseMove", nil, nil)
+	resolve("host.platform.input.mouseClick", nil, nil)
+	resolve("host.platform.input.mouseDoubleClick", nil, nil)
+	resolve("host.platform.input.mouseRightClick", func(req map[string]any) {
+		payload := req["payload"].(map[string]any)
+		if payload["x"] != float64(41) || payload["y"] != float64(42) {
+			t.Fatalf("unexpected right-click payload: %+v", payload)
+		}
+	}, nil)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("platform API error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("platform API calls did not return")
+	}
+
+	if region["ok"] != true || capture["dataUrl"] == nil || color["hex"] != "#ffffff" {
+		t.Fatalf("unexpected capture results: region=%+v capture=%+v color=%+v", region, capture, color)
+	}
+	if primary["id"] != float64(1) || len(displays) != 2 || cursor != (ScreenPoint{X: 7, Y: 8}) {
+		t.Fatalf("unexpected display results: primary=%+v displays=%+v cursor=%+v", primary, displays, cursor)
+	}
+	if nearest["id"] != float64(2) || matching["id"] != float64(3) || len(sources) != 1 {
+		t.Fatalf("unexpected lookup results: nearest=%+v matching=%+v sources=%+v", nearest, matching, sources)
+	}
+	if dipPoint.X != 50 || screenPoint.X != 100 || dipRect.Width != 2 || screenRect.Width != 14 {
+		t.Fatalf("unexpected conversion results: %+v %+v %+v %+v", dipPoint, screenPoint, dipRect, screenRect)
+	}
+}
+
+// @capability platform.screen_input_screenshot
+func TestCommandContextPlatformScreenPropagatesTrace(t *testing.T) {
+	_, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("display", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			return ctx.Platform().Screen.GetPrimaryDisplay()
+		})
+	})
+	writeLine(t, in, map[string]any{"type": "host.hello"})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-platform-trace", "commandId": "display", "input": nil,
+		"trace": map[string]any{
+			"traceId": "trace-platform", "parentSpanId": "span-platform", "generation": "generation-platform",
+		},
+	})
+	in.Flush()
+	consumed := 0
+	_ = readNextLine(t, out, &consumed)
+	req := readNextLine(t, out, &consumed)
+	if req["type"] != "host.platform.screen.getPrimaryDisplay" {
+		t.Fatalf("unexpected platform request: %+v", req)
+	}
+	trace := req["trace"].(map[string]any)
+	if trace["traceId"] != "trace-platform" || trace["parentSpanId"] != "span-platform" || trace["generation"] != "generation-platform" {
+		t.Fatalf("unexpected platform trace: %+v", trace)
+	}
+	writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": map[string]any{"id": 1}})
+	in.Flush()
+	result := readNextLine(t, out, &consumed)
+	if result["type"] != "command.result" {
+		t.Fatalf("expected command.result, got %+v", result)
 	}
 }
 
@@ -1126,7 +1551,7 @@ func TestRuntimeOpenSessionInvokeStreamOutsideCommandRequiresParent(t *testing.T
 func TestCommandContextOpenSession(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			session, err := ctx.OpenSession("com.target", WithSessionProfileID("work"))
+			session, err := ctx.OpenSession("com.target")
 			if err != nil {
 				return nil, err
 			}
@@ -1139,7 +1564,12 @@ func TestCommandContextOpenSession(t *testing.T) {
 	})
 	_ = p
 	writeLine(t, in, map[string]any{"type": "host.hello"})
-	writeLine(t, in, map[string]any{"type": "command.invoke", "id": "cmd-1", "commandId": "proxy", "input": nil})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "cmd-1", "commandId": "proxy", "input": nil,
+		"invocation": map[string]any{
+			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "work"},
+		},
+	})
 	in.Flush()
 	consumed := 0
 	_ = readNextLine(t, out, &consumed) // runtime.ready
@@ -1660,6 +2090,7 @@ func TestTracePropagationWithTrace(t *testing.T) {
 		"trace": map[string]any{
 			"traceId":      "trace-abc-123",
 			"parentSpanId": "span-xyz",
+			"generation":   "stream-generation-current",
 		},
 	})
 	in.Flush()
@@ -1680,6 +2111,9 @@ func TestTracePropagationWithTrace(t *testing.T) {
 	}
 	if trace["parentSpanId"] != "span-xyz" {
 		t.Fatalf("expected parentSpanId=span-xyz, got %v", trace["parentSpanId"])
+	}
+	if trace["generation"] != "stream-generation-current" {
+		t.Fatalf("expected generation=stream-generation-current, got %v", trace["generation"])
 	}
 	writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": "Brickly"})
 	in.Flush()

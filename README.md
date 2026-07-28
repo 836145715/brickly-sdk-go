@@ -81,16 +81,20 @@ SDK 自动完成：
 | 字段 / 方法                                        | 作用                                                                                                                     |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `RequestID` / `CommandID`                          | 当前请求与命令 id                                                                                                        |
+| `Invocation`                                      | 宿主注入的可信调用来源；未提供时 `Source` 为 `unknown`                                                                   |
 | `Progress(value, message)`                         | 进度（value ∈ [0,1]）                                                                                                    |
 | `Chunk(name, chunk)`                               | 向具名输出追加流式片段                                                                                                   |
 | `Output(name, value)`                              | 一次性覆盖具名输出                                                                                                       |
 | `Context()`                                        | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
 | `IsCancelled()`                                    | 协作式取消轮询                                                                                                           |
 | `Invoke(brickID, commandID, input, into, opts...)` | 跨 Brick 调用命令，自动携带当前 `parentRequestId`，支持 `WithProfileID`                                                  |
+| `InvokeRoot(brickID, commandID, input, into, opts...)` | 发起独立 root 调用，携带当前 `parentRequestId` 供宿主审计                                                            |
 | `InvokeStream(brickID, commandID, input, opts...)` | 跨 Brick 流式调用命令，自动携带当前 `parentRequestId`，支持 `WithProfileID`                                              |
 | `OpenSession(brickID, opts...)`                    | 打开跨 Brick 会话，支持 `WithSessionProfileID`；`session.Invoke` / `session.InvokeStream` 自动携带当前 `parentRequestId` |
 | `UI()` / `Events()`                                | 与 `Runtime.UI` / `Runtime.Events` 同源                                                                                  |
 | `Platform()` / `System()`                          | 与 `Runtime.Platform` / `Runtime.System` 同源                                                                            |
+
+`Invocation.DependencyProfiles` 为目标 Brick 指定默认 Profile。`Invoke`、`InvokeRoot`、`InvokeStream` 和 `OpenSession` 在未显式传 Profile 时自动使用该映射；`WithProfileID` / `WithSessionProfileID` 始终优先。
 
 ### `CommandHandler` 签名
 
@@ -275,6 +279,33 @@ if err != nil {
 
 return snapshot, nil
 ```
+
+## 平台 Screen / Input / Screenshot API
+
+`p.Platform.Screen.*`、`p.Platform.Input.*`、`p.Platform.Screenshot.*` 及 handler 内对应的 `ctx.Platform()` API 分别提供屏幕读取、输入自动化和交互式区域截图能力：
+
+```go
+region, err := ctx.Platform().Screenshot.SelectRegion(brickly.ScreenshotRegionOptions{})
+if err != nil {
+    return nil, err
+}
+
+display, err := ctx.Platform().Screen.GetPrimaryDisplay()
+if err != nil {
+    return nil, err
+}
+
+err = ctx.Platform().Input.KeyboardTap(brickly.KeyboardTapPayload{
+    Key: "A", Modifiers: []string{"control"},
+})
+if err != nil {
+    return nil, err
+}
+
+return map[string]any{"region": region, "display": display}, nil
+```
+
+`Screenshot` 与 `Screen` 能力需要 `os.screenshot` 权限；截图传入自定义 `outputPath` 时还需要 `fs.write`。`Input` 能力需要 `os.input`，会影响当前前台应用，应仅在用户明确触发时调用。权限拒绝及其他宿主错误会以 `BppError` 原样返回。
 
 ---
 
@@ -567,3 +598,12 @@ replace github.com/836145715/brickly-sdk-go => ../../../../packages/brickly-sdk-
 | `win.webContents.send(...)`             | `win.WebContents().Send(...)`                |
 
 行为一致：序列化字节级等价、协议请求 ID 前缀 `<brickId>-<pid>-<seq>`、stdout 仅写协议、业务日志走 `runtime.log`。
+
+### AI 对齐框架
+
+本 SDK 是 **Follower** 实现。用 AI 跟进 Node 时请走：
+
+- [`specs/sdk/AGENT.md`](../../../specs/sdk/AGENT.md)
+- [`specs/sdk/capability-matrix.yaml`](../../../specs/sdk/capability-matrix.yaml)
+- [`specs/sdk/api-mapping.yaml`](../../../specs/sdk/api-mapping.yaml)
+- [`specs/sdk/prompts/follower-agent.md`](../../../specs/sdk/prompts/follower-agent.md)（`target=go`）

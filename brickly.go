@@ -112,8 +112,8 @@ func New(opts Options) *Runtime {
 	})
 	p.UI = &UI{runtime: p}
 	p.Events = &EventBus{runtime: p}
-	p.System = &SystemAPI{runtime: p}
-	p.Platform = &PlatformAPI{System: p.System, Clipboard: &ClipboardAPI{runtime: p}}
+	p.Platform = newPlatformAPI(p, nil)
+	p.System = p.Platform.System
 	p.Config = map[string]any{}
 	return p
 }
@@ -250,7 +250,7 @@ func (p *Runtime) handleInvoke(msg rawMessage) {
 		return
 	}
 
-	ctx := newCommandContext(p, reqID, commandID, extractTrace(msg))
+	ctx := newCommandContext(p, reqID, commandID, extractCommandInvocation(msg), extractTrace(msg))
 	go func() {
 		defer p.finishInvoke(reqID)
 
