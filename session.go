@@ -1,5 +1,7 @@
 package brickly
 
+import "encoding/json"
+
 // SessionOption 配置跨 Brick 会话。默认使用目标 Brick 的默认 Profile。
 type SessionOption func(*sessionOptions)
 
@@ -74,13 +76,46 @@ func (s *BrickSession) Invoke(commandID string, input any, into any) error {
 		"type":            "host.session.invoke",
 		"sessionId":       s.ID,
 		"commandId":       commandID,
-		"input":           input,
+		"input":           dehydrateResourceValue(input),
 		"parentRequestId": s.parentRequestID,
 	}
 	if tm := s.trace.asMap(); tm != nil {
 		msg["trace"] = tm
 	}
-	return s.runtime.transport.hostCall(msg, into)
+	if into == nil {
+		return s.runtime.transport.hostCall(msg, nil)
+	}
+	var raw any
+	if err := s.runtime.transport.hostCall(msg, &raw); err != nil {
+		return err
+	}
+	value := hydrateResourceValue(raw, s.runtime.transport, 0)
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, into)
+}
+
+// InvokeResource 在会话中调用并始终返回 ResourceHandle。
+func (s *BrickSession) InvokeResource(commandID string, input any) (*ResourceHandle, error) {
+	if s.parentRequestID == "" || !s.runtime.isCommandActive(s.parentRequestID) {
+		return nil, parentInvocationRequired("session.InvokeResource 必须在有效 command handler 内调用")
+	}
+	msg := map[string]any{"type": "host.session.invoke", "sessionId": s.ID, "commandId": commandID, "input": dehydrateResourceValue(input), "parentRequestId": s.parentRequestID, "resultMode": "resource"}
+	if tm := s.trace.asMap(); tm != nil {
+		msg["trace"] = tm
+	}
+	var raw any
+	if err := s.runtime.transport.hostCall(msg, &raw); err != nil {
+		return nil, err
+	}
+	value := hydrateResourceValue(raw, s.runtime.transport, 0)
+	handle, ok := value.(*ResourceHandle)
+	if !ok {
+		return nil, NewBppError("PROTOCOL_ERROR", "session resource invocation did not return a ResourceRef")
+	}
+	return handle, nil
 }
 
 // InvokeStream 在会话绑定的目标 Brick 实例上流式调用命令。
@@ -93,7 +128,7 @@ func (s *BrickSession) InvokeStream(commandID string, input any) (<-chan InvokeS
 		"id":              s.runtime.transport.nextID(),
 		"sessionId":       s.ID,
 		"commandId":       commandID,
-		"input":           input,
+		"input":           dehydrateResourceValue(input),
 		"parentRequestId": s.parentRequestID,
 		"stream":          true,
 	}

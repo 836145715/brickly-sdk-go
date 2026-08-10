@@ -1,6 +1,9 @@
 package brickly
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // CommandContext 是 CommandHandler 的第一个参数。等价于 Node SDK 的
 // CommandContext，但用 Go 惯用法：Context() 返回 context.Context 用于取消；
@@ -66,6 +69,33 @@ func (c *CommandContext) IsCancelled() bool {
 	return c.runtime.cancelled[c.RequestID]
 }
 
+// HydrateResource 将 command 原始 JSON 输入中解码出的 ResourceRef 绑定为可读句柄。
+// Go handler 为保持兼容仍接收 json.RawMessage，因此需要在解码 Ref 后显式调用一次。
+func (c *CommandContext) HydrateResource(ref ResourceRef) (*ResourceHandle, error) {
+	if c == nil || c.runtime == nil || c.runtime.transport == nil {
+		return nil, NewBppError("INTERNAL_ERROR", "command resource transport is unavailable")
+	}
+	if !validTypedResourceRef(ref) {
+		return nil, NewBppError("PROTOCOL_ERROR", "ResourceRef 格式无效")
+	}
+	return newResourceHandle(c.runtime.transport, ref), nil
+}
+
+// CreateResource 创建绑定当前 command 生命周期的资源。
+func (c *CommandContext) CreateResource(content any, options *ResourceCreateOptions) (*ResourceHandle, error) {
+	return c.runtime.createResource(content, options, c.RequestID)
+}
+
+// CreateResourceFrom 从 reader 创建绑定当前 command 生命周期的资源。
+func (c *CommandContext) CreateResourceFrom(reader io.Reader, options *ResourceCreateOptions) (*ResourceHandle, error) {
+	return c.runtime.createResourceFrom(reader, options, c.RequestID)
+}
+
+// CreateResourceWriter 创建绑定当前 command 生命周期的 store-and-forward writer。
+func (c *CommandContext) CreateResourceWriter(options *ResourceCreateOptions) (*ResourceWriter, error) {
+	return c.runtime.createResourceWriter(options, c.RequestID)
+}
+
 // Progress 发送 command.progress。value 通常在 [0,1]；message 可为空。
 func (c *CommandContext) Progress(value float64, message string) {
 	m := map[string]any{"type": "command.progress", "id": c.RequestID, "progress": value}
@@ -78,14 +108,14 @@ func (c *CommandContext) Progress(value float64, message string) {
 // Output 发送一次性 command.output（相同 name 后者覆盖前者）。
 func (c *CommandContext) Output(name string, value any) {
 	c.runtime.transport.send(map[string]any{
-		"type": "command.output", "id": c.RequestID, "name": name, "value": value,
+		"type": "command.output", "id": c.RequestID, "name": name, "value": dehydrateResourceValue(value),
 	})
 }
 
 // Chunk 向具名输出追加流式片段（前端按顺序拼接）。
 func (c *CommandContext) Chunk(name string, chunk any) {
 	c.runtime.transport.send(map[string]any{
-		"type": "command.chunk", "id": c.RequestID, "name": name, "chunk": chunk,
+		"type": "command.chunk", "id": c.RequestID, "name": name, "chunk": dehydrateResourceValue(chunk),
 	})
 }
 
@@ -151,6 +181,22 @@ func (c *CommandContext) Invoke(brickID, commandID string, input any, into any, 
 		c.applyInvokeContext(brickID, options)
 	})
 	return c.runtime.Invoke(brickID, commandID, input, into, opts...)
+}
+
+// InvokeResource 跨 Brick 调用并始终返回 ResourceHandle。
+func (c *CommandContext) InvokeResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
+	if !c.runtime.isCommandActive(c.RequestID) {
+		return nil, parentInvocationRequired("InvokeResource must run inside an active command handler")
+	}
+	opts = append(opts, func(options *invokeOptions) { c.applyInvokeContext(brickID, options) })
+	return c.runtime.InvokeResource(brickID, commandID, input, opts...)
+}
+
+// InvokeRootResource 发起带审计父请求的资源调用。
+func (c *CommandContext) InvokeRootResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
+	options := collectInvokeOptions(opts)
+	c.applyInvokeContext(brickID, &options)
+	return c.runtime.invokeResourceWithType("host.invokeRoot", brickID, commandID, input, options)
 }
 
 // InvokeRoot 发起独立 root 调用，并携带当前 command request id 供宿主审计。

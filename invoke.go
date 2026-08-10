@@ -49,12 +49,51 @@ func (p *Runtime) InvokeRoot(brickID, commandID string, input any, into any, opt
 	return p.invokeWithType("host.invokeRoot", brickID, commandID, input, into, options)
 }
 
+// InvokeResource 在命令作用域内调用并始终以 ResourceHandle 返回结果。
+func (p *Runtime) InvokeResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
+	options := collectInvokeOptions(opts)
+	if options.parentRequestID == "" {
+		return nil, parentInvocationRequired("InvokeResource must run through CommandContext")
+	}
+	return p.invokeResourceWithType("host.invoke", brickID, commandID, input, options)
+}
+
+// InvokeRootResource 发起 root 调用并始终以 ResourceHandle 返回结果。
+func (p *Runtime) InvokeRootResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
+	options := collectInvokeOptions(opts)
+	options.parentRequestID = ""
+	return p.invokeResourceWithType("host.invokeRoot", brickID, commandID, input, options)
+}
+
+func (p *Runtime) invokeResourceWithType(msgType, brickID, commandID string, input any, options invokeOptions) (*ResourceHandle, error) {
+	msg := map[string]any{"type": msgType, "brickId": brickID, "commandId": commandID, "input": dehydrateResourceValue(input), "resultMode": "resource"}
+	if options.profileID != "" {
+		msg["profileId"] = options.profileID
+	}
+	if options.parentRequestID != "" {
+		msg["parentRequestId"] = options.parentRequestID
+	}
+	if tm := options.trace.asMap(); tm != nil {
+		msg["trace"] = tm
+	}
+	var raw any
+	if err := p.transport.hostCall(msg, &raw); err != nil {
+		return nil, err
+	}
+	value := hydrateResourceValue(raw, p.transport, 0)
+	handle, ok := value.(*ResourceHandle)
+	if !ok {
+		return nil, NewBppError("PROTOCOL_ERROR", "resource invocation did not return a ResourceRef")
+	}
+	return handle, nil
+}
+
 func (p *Runtime) invokeWithType(msgType, brickID, commandID string, input any, into any, options invokeOptions) error {
 	msg := map[string]any{
 		"type":      msgType,
 		"brickId":   brickID,
 		"commandId": commandID,
-		"input":     input,
+		"input":     dehydrateResourceValue(input),
 	}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
@@ -65,7 +104,19 @@ func (p *Runtime) invokeWithType(msgType, brickID, commandID string, input any, 
 	if tm := options.trace.asMap(); tm != nil {
 		msg["trace"] = tm
 	}
-	return p.transport.hostCall(msg, into)
+	if into == nil {
+		return p.transport.hostCall(msg, nil)
+	}
+	var raw any
+	if err := p.transport.hostCall(msg, &raw); err != nil {
+		return err
+	}
+	value := hydrateResourceValue(raw, p.transport, 0)
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, into)
 }
 
 // InvokeStreamEvent 是跨 Brick 流式调用返回的一条事件。
@@ -96,7 +147,7 @@ func (p *Runtime) invokeStreamWithOptions(brickID, commandID string, input any, 
 		"id":        p.transport.nextID(),
 		"brickId":   brickID,
 		"commandId": commandID,
-		"input":     input,
+		"input":     dehydrateResourceValue(input),
 		"stream":    true,
 	}
 	if options.profileID != "" {

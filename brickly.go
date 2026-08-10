@@ -328,7 +328,16 @@ func (p *Runtime) handleEventNotify(msg rawMessage) {
 		}
 	}
 
-	p.Events.dispatch(event, payloadRaw, msg.Raw)
+	p.Events.dispatch(event, unwrapEventResource(hydrateResourceValue(payloadRaw, p.transport, 0)), msg.Raw)
+}
+
+func unwrapEventResource(value any) any {
+	if envelope, ok := value.(map[string]any); ok && envelope["encoding"] == "json" {
+		if resource, ok := envelope["resource"].(*ResourceHandle); ok {
+			return resource
+		}
+	}
+	return value
 }
 
 func (p *Runtime) handleShutdown() {

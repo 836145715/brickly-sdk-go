@@ -87,14 +87,56 @@ SDK 自动完成：
 | `Output(name, value)`                              | 一次性覆盖具名输出                                                                                                       |
 | `Context()`                                        | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
 | `IsCancelled()`                                    | 协作式取消轮询                                                                                                           |
+| `HydrateResource(ref)`                             | 将 `json.RawMessage` 输入中解码出的 `ResourceRef` 绑定为可读 `ResourceHandle`                                            |
+| `CreateResource(content, options)`                 | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                               |
+| `CreateResourceFrom(reader, options)`              | 从 `io.Reader` 流式创建绑定当前 command 生命周期的资源                                                                  |
+| `CreateResourceWriter(options)`                    | 创建绑定当前 command 生命周期的 store-and-forward writer                                                               |
 | `Invoke(brickID, commandID, input, into, opts...)` | 跨 Brick 调用命令，自动携带当前 `parentRequestId`，支持 `WithProfileID`                                                  |
+| `InvokeResource(brickID, commandID, input, opts...)` | 跨 Brick 调用并始终返回 `*ResourceHandle`                                                               |
 | `InvokeRoot(brickID, commandID, input, into, opts...)` | 发起独立 root 调用，携带当前 `parentRequestId` 供宿主审计                                                            |
+| `InvokeRootResource(brickID, commandID, input, opts...)` | Root 调用并始终返回 `*ResourceHandle`                                                               |
 | `InvokeStream(brickID, commandID, input, opts...)` | 跨 Brick 流式调用命令，自动携带当前 `parentRequestId`，支持 `WithProfileID`                                              |
 | `OpenSession(brickID, opts...)`                    | 打开跨 Brick 会话，支持 `WithSessionProfileID`；`session.Invoke` / `session.InvokeStream` 自动携带当前 `parentRequestId` |
 | `UI()` / `Events()`                                | 与 `Runtime.UI` / `Runtime.Events` 同源                                                                                  |
 | `Platform()` / `System()`                          | 与 `Runtime.Platform` / `Runtime.System` 同源                                                                            |
 
 `Invocation.DependencyProfiles` 为目标 Brick 指定默认 Profile。`Invoke`、`InvokeRoot`、`InvokeStream` 和 `OpenSession` 在未显式传 Profile 时自动使用该映射；`WithProfileID` / `WithSessionProfileID` 始终优先。
+
+资源调用返回 `*ResourceHandle`，实现 `io.ReadCloser`，按块读取宿主资源并提供 `Text()`、`JSON(out)`、`SaveTo(path)`、`Revoke()`。资源超过 200 MiB 时不能整体物化，应使用流读取或直接保存到文件；将句柄再次作为输入时 SDK 只传递 `ResourceRef`。
+
+Go command handler 为兼容既有 API 仍接收 `json.RawMessage`。输入包含资源时，先把对应字段解码为
+`ResourceRef`，再调用 `ctx.HydrateResource(ref)` 获得绑定当前 transport 的可读句柄；Node 与 Python
+handler 的动态输入会自动完成这一步。
+
+Brick 可通过 `runtime.CreateResource(content, options)` 主动创建资源；`content` 只接受
+`string` 或 `[]byte`。字符串默认 `text/plain; charset=utf-8`，字节默认
+`application/octet-stream`，通常可传 `nil` options。该 API 要求 `resource.register`。小内容走
+一次性快速路径，大内容自动切换到 Writer，调用方式和返回类型不变。
+
+大内容使用 `runtime.CreateResourceFrom(reader, options)`。它从 `io.Reader` 自动聚合并按最大 1 MiB
+顺序写入 Host，finish 后返回 `*ResourceHandle`；通常可直接传 `nil` options。finish 前资源
+不可读取，发布后下游读取速度不会影响已经结束的上传。资源总大小不受普通 invoke 的 200 MiB
+上限约束。Host 限制并发上传并在生产环境保留 1 GiB 磁盘安全余量；部署还可配置全局和
+Brick 维度的 pending bytes 配额。
+
+需要主动分多次写入时使用 `CreateResourceWriter`。Writer 实现 `io.Writer` 和 `io.ReaderFrom`：
+
+```go
+writer, err := runtime.CreateResourceWriter(options)
+_, err = writer.Write(header)
+_, err = writer.ReadFrom(downloadStream)
+resource, err := writer.Finish()
+```
+
+同一 Writer 的 `Write`、`ReadFrom`、`Finish`、`Abort` 按调用顺序串行执行；`Abort` 不会越过
+已经开始的数据源操作。`WriteString` 直接分段复制到内部缓冲，不会额外创建完整 `[]byte` 副本。
+
+普通 `Invoke` / `InvokeRoot` 始终解码为直接值，逻辑 JSON 输入和结果上限为 200 MiB；
+超限返回 `PAYLOAD_TOO_LARGE`，不会静默改成资源类型。资源结果应从第一次调用起使用
+`InvokeResource`、`InvokeRootResource` 或 `session.InvokeResource`。EventBus 回调统一收到
+外层 `*ResourceHandle`，先调用 `JSON(&payload)` 取得业务对象。资源内容按普通 JSON
+解析，内嵌 `ResourceRef` 不会自动水合，需要读取时应显式转换。Capability token 不得写入
+日志或持久化，Ref 只能在同一宿主和 TTL 内使用。
 
 ### `CommandHandler` 签名
 
@@ -508,7 +550,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/bpp.schema.json`](../../../specs/bpp.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 BPP 协议版本：`0.2.0`；窗口使用五条 `host.ui.window.*` 消息和 105 个反射方法
+- 当前 SDK 版本：`0.3.0`（`SdkVersion`）；BPP 协议版本：`0.2.0`；窗口使用五条 `host.ui.window.*` 消息和 105 个反射方法
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
 ---
@@ -539,13 +581,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.1.0
+npm run sdk:go:publish -- 0.3.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.1.0 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.3.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -553,14 +595,14 @@ npm run sdk:go:publish -- 0.1.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.1.0`
-- `git push origin <branch>` 和 `git push origin v0.1.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.1.0` 触发 Go module 缓存
+- `git tag -a v0.3.0`
+- `git push origin <branch>` 和 `git push origin v0.3.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.3.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.1.0
+go get github.com/836145715/brickly-sdk-go@v0.3.0
 ```
 
 ---

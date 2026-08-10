@@ -2,6 +2,9 @@ package brickly
 
 import "encoding/json"
 
+// SdkVersion 是 Go SDK 发布版本（与 Node/Python 包版本对齐）。
+const SdkVersion = "0.3.0"
+
 // ProtocolVersion 是当前 SDK 实现的 BPP 协议版本。
 // 保持与 packages/brickly-sdk-node/src/protocol.ts 一致。
 const ProtocolVersion = "0.2.0"

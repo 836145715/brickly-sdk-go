@@ -13,8 +13,8 @@ type EventEnvelope struct {
 	PublishedAt   string
 }
 
-// EventHandler 是事件订阅回调。payload 是宿主下发的原始 JSON 解码值
-// （map[string]any / []any / 基本类型），可进一步反序列化为具体结构体。
+// EventHandler 是事件订阅回调。EventBus JSON 事件的 payload 是 *ResourceHandle，
+// 调用方按需流式读取或调用 JSON 解码业务载荷。
 type EventHandler func(payload any, env EventEnvelope)
 
 // EventBus 提供事件订阅与发布，对应 Node SDK 的 brick.events。

@@ -302,3 +302,79 @@ func (t *transport) hostCall(msg map[string]any, into any) error {
 		return &e2
 	}
 }
+
+func (t *transport) resourceOpen(ref ResourceRef) (resourceOpenResult, error) {
+	var result resourceOpenResult
+	err := t.hostCall(map[string]any{"type": "host.resource.open", "resource": ref}, &result)
+	if err == nil && result.StreamID == "" {
+		return result, NewBppError("PROTOCOL_ERROR", "host.resource.open returned invalid result")
+	}
+	return result, err
+}
+
+func (t *transport) resourceCreate(content map[string]any, metadata map[string]any) (ResourceRef, error) {
+	var result ResourceRef
+	err := t.hostCall(map[string]any{
+		"type": "host.resource.create", "content": content, "metadata": metadata,
+	}, &result)
+	return result, err
+}
+
+func (t *transport) resourceUploadStart(metadata map[string]any, expectedSizeBytes int64, parentRequestID string) (string, error) {
+	message := map[string]any{"type": "host.resource.upload.start", "metadata": metadata}
+	if expectedSizeBytes > 0 {
+		message["expectedSizeBytes"] = expectedSizeBytes
+	}
+	if parentRequestID != "" {
+		message["parentRequestId"] = parentRequestID
+	}
+	var result struct {
+		UploadID string `json:"uploadId"`
+	}
+	if err := t.hostCall(message, &result); err != nil {
+		return "", err
+	}
+	if result.UploadID == "" {
+		return "", NewBppError("PROTOCOL_ERROR", "host.resource.upload.start returned invalid uploadId")
+	}
+	return result.UploadID, nil
+}
+
+func (t *transport) resourceUploadWrite(uploadID string, offset int64, data string) (int64, error) {
+	var result struct {
+		AcceptedBytes int64 `json:"acceptedBytes"`
+	}
+	err := t.hostCall(map[string]any{
+		"type": "host.resource.upload.write", "uploadId": uploadID, "offset": offset,
+		"content": map[string]any{"encoding": "base64", "data": data},
+	}, &result)
+	return result.AcceptedBytes, err
+}
+
+func (t *transport) resourceUploadFinish(uploadID string) (ResourceRef, error) {
+	var result ResourceRef
+	err := t.hostCall(map[string]any{
+		"type": "host.resource.upload.finish", "uploadId": uploadID,
+	}, &result)
+	return result, err
+}
+
+func (t *transport) resourceUploadAbort(uploadID string) error {
+	return t.hostCall(map[string]any{
+		"type": "host.resource.upload.abort", "uploadId": uploadID,
+	}, nil)
+}
+
+func (t *transport) resourceRead(streamID string) (resourceReadResult, error) {
+	var result resourceReadResult
+	err := t.hostCall(map[string]any{"type": "host.resource.read", "streamId": streamID}, &result)
+	return result, err
+}
+
+func (t *transport) resourceClose(streamID string) error {
+	return t.hostCall(map[string]any{"type": "host.resource.close", "streamId": streamID}, nil)
+}
+
+func (t *transport) resourceRevoke(ref ResourceRef) error {
+	return t.hostCall(map[string]any{"type": "host.resource.revoke", "resource": ref}, nil)
+}
