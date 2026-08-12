@@ -66,7 +66,11 @@ func (p *Runtime) InvokeRootResource(brickID, commandID string, input any, opts 
 }
 
 func (p *Runtime) invokeResourceWithType(msgType, brickID, commandID string, input any, options invokeOptions) (*ResourceHandle, error) {
-	msg := map[string]any{"type": msgType, "brickId": brickID, "commandId": commandID, "input": dehydrateResourceValue(input), "resultMode": "resource"}
+	prepared, err := prepareResourceValue(input)
+	if err != nil {
+		return nil, err
+	}
+	msg := map[string]any{"type": msgType, "brickId": brickID, "commandId": commandID, "input": prepared, "resultMode": "resource"}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
 	}
@@ -89,11 +93,15 @@ func (p *Runtime) invokeResourceWithType(msgType, brickID, commandID string, inp
 }
 
 func (p *Runtime) invokeWithType(msgType, brickID, commandID string, input any, into any, options invokeOptions) error {
+	prepared, err := prepareResourceValue(input)
+	if err != nil {
+		return err
+	}
 	msg := map[string]any{
 		"type":      msgType,
 		"brickId":   brickID,
 		"commandId": commandID,
-		"input":     dehydrateResourceValue(input),
+		"input":     prepared,
 	}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
@@ -107,16 +115,7 @@ func (p *Runtime) invokeWithType(msgType, brickID, commandID string, input any, 
 	if into == nil {
 		return p.transport.hostCall(msg, nil)
 	}
-	var raw any
-	if err := p.transport.hostCall(msg, &raw); err != nil {
-		return err
-	}
-	value := hydrateResourceValue(raw, p.transport, 0)
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, into)
+	return p.transport.hostCall(msg, into)
 }
 
 // InvokeStreamEvent 是跨 Brick 流式调用返回的一条事件。
@@ -142,12 +141,16 @@ func (p *Runtime) InvokeStream(brickID, commandID string, input any, opts ...Inv
 }
 
 func (p *Runtime) invokeStreamWithOptions(brickID, commandID string, input any, options invokeOptions) (<-chan InvokeStreamEvent, <-chan error) {
+	prepared, err := prepareResourceValue(input)
+	if err != nil {
+		return failedInvokeStream(err)
+	}
 	msg := map[string]any{
 		"type":      "host.invoke",
 		"id":        p.transport.nextID(),
 		"brickId":   brickID,
 		"commandId": commandID,
-		"input":     dehydrateResourceValue(input),
+		"input":     prepared,
 		"stream":    true,
 	}
 	if options.profileID != "" {

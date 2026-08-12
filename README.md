@@ -73,6 +73,7 @@ SDK 自动完成：
 | `InvokeRoot(brickID, commandID, input, into, opts...)` | command 外发起 root 跨 Brick 调用                                          |
 | `InvokeStream(brickID, commandID, input, opts...)`     | command 作用域内的流式 child 调用底层入口；普通业务使用 `ctx.InvokeStream` |
 | `OpenSession(brickID, opts...)`                        | 打开跨 Brick 会话；普通业务使用 `ctx.OpenSession`                          |
+| `OpenResource(ref)`                                    | 惰性绑定已有 `ResourceRef`，不立即访问 Host                                |
 | `Start()`                                              | 启动 stdin 循环（阻塞）                                                    |
 | `Debug/Info/Warn/Error(message, fields)`               | 结构化日志 → `runtime.log`（带 level，推荐）                               |
 
@@ -83,11 +84,10 @@ SDK 自动完成：
 | `RequestID` / `CommandID`                          | 当前请求与命令 id                                                                                                        |
 | `Invocation`                                      | 宿主注入的可信调用来源；未提供时 `Source` 为 `unknown`                                                                   |
 | `Progress(value, message)`                         | 进度（value ∈ [0,1]）                                                                                                    |
-| `Chunk(name, chunk)`                               | 向具名输出追加流式片段                                                                                                   |
-| `Output(name, value)`                              | 一次性覆盖具名输出                                                                                                       |
+| `Chunk(name, chunk) error`                         | 向具名输出追加流式片段；资源引用无效或 payload 过深时返回错误                                                            |
+| `Output(name, value) error`                        | 一次性覆盖具名输出；资源引用无效或 payload 过深时返回错误                                                                |
 | `Context()`                                        | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
 | `IsCancelled()`                                    | 协作式取消轮询                                                                                                           |
-| `HydrateResource(ref)`                             | 将 `json.RawMessage` 输入中解码出的 `ResourceRef` 绑定为可读 `ResourceHandle`                                            |
 | `CreateResource(content, options)`                 | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                               |
 | `CreateResourceFrom(reader, options)`              | 从 `io.Reader` 流式创建绑定当前 command 生命周期的资源                                                                  |
 | `CreateResourceWriter(options)`                    | 创建绑定当前 command 生命周期的 store-and-forward writer                                                               |
@@ -104,13 +104,14 @@ SDK 自动完成：
 
 资源调用返回 `*ResourceHandle`，实现 `io.ReadCloser`，按块读取宿主资源并提供 `Text()`、`JSON(out)`、`SaveTo(path)`、`Revoke()`。资源超过 200 MiB 时不能整体物化，应使用流读取或直接保存到文件；将句柄再次作为输入时 SDK 只传递 `ResourceRef`。
 
-Go command handler 为兼容既有 API 仍接收 `json.RawMessage`。输入包含资源时，先把对应字段解码为
-`ResourceRef`，再调用 `ctx.HydrateResource(ref)` 获得绑定当前 transport 的可读句柄；Node 与 Python
-handler 的动态输入会自动完成这一步。
+Go command handler 接收 `json.RawMessage`。输入包含资源时，先把对应字段解码为 `ResourceRef`，
+再调用 `runtime.OpenResource(ref)` 获得绑定当前 transport 的可读句柄。Node、Python 和 Renderer
+同样保留业务 JSON 中的 Ref，并通过各自的 `resources.open(ref)` 显式打开。
 
 Brick 可通过 `runtime.CreateResource(content, options)` 主动创建资源；`content` 只接受
 `string` 或 `[]byte`。字符串默认 `text/plain; charset=utf-8`，字节默认
-`application/octet-stream`，通常可传 `nil` options。该 API 要求 `resource.register`。小内容走
+`application/octet-stream`，通常可传 `nil` options。该能力无需声明 manifest 权限，但仍受 Host
+配额与生命周期治理。小内容走
 一次性快速路径，大内容自动切换到 Writer，调用方式和返回类型不变。
 
 大内容使用 `runtime.CreateResourceFrom(reader, options)`。它从 `io.Reader` 自动聚合并按最大 1 MiB
@@ -136,7 +137,20 @@ resource, err := writer.Finish()
 `InvokeResource`、`InvokeRootResource` 或 `session.InvokeResource`。EventBus 回调统一收到
 外层 `*ResourceHandle`，先调用 `JSON(&payload)` 取得业务对象。资源内容按普通 JSON
 解析，内嵌 `ResourceRef` 不会自动水合，需要读取时应显式转换。Capability token 不得写入
-日志或持久化，Ref 只能在同一宿主和 TTL 内使用。
+日志或持久化，Ref 只能在同一宿主和 TTL 内使用。无论事件大小，回调都不会收到内联对象或
+内部 `{"resource": ..., "encoding": "json"}` 包装；消费完成后应调用 `Close()`。
+
+SDK 在发送 invoke、stream、command 结果、chunk、output 或事件时，会自动把嵌套
+`*ResourceHandle` 转成完整 `ResourceRef`。`OpenResource` 只做校验和 transport 绑定，不会立即访问
+Host：
+
+```go
+handle, err := runtime.OpenResource(payload.Attachment)
+if err != nil {
+    return nil, err
+}
+defer handle.Close()
+```
 
 ### `CommandHandler` 签名
 
@@ -550,7 +564,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/bpp.schema.json`](../../../specs/bpp.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.3.0`（`SdkVersion`）；BPP 协议版本：`0.2.0`；窗口使用五条 `host.ui.window.*` 消息和 105 个反射方法
+- 当前 SDK 版本：`0.3.1`（`SdkVersion`）；BPP 协议版本：`0.2.0`；窗口使用五条 `host.ui.window.*` 消息和 105 个反射方法
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
 ---
@@ -581,13 +595,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.3.0
+npm run sdk:go:publish -- 0.3.1
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.3.0 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.3.1 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -595,14 +609,14 @@ npm run sdk:go:publish -- 0.3.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.3.0`
-- `git push origin <branch>` 和 `git push origin v0.3.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.3.0` 触发 Go module 缓存
+- `git tag -a v0.3.1`
+- `git push origin <branch>` 和 `git push origin v0.3.1`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.3.1` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.3.0
+go get github.com/836145715/brickly-sdk-go@v0.3.1
 ```
 
 ---

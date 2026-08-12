@@ -50,10 +50,14 @@ func (e *EventBus) On(event string, fn EventHandler) func() {
 
 // Publish 发布事件到事件总线（走 host.event.publish）。
 func (e *EventBus) Publish(event string, payload any) error {
+	prepared, err := prepareResourceValue(payload)
+	if err != nil {
+		return err
+	}
 	return e.runtime.transport.hostCall(map[string]any{
 		"type":    "host.event.publish",
 		"event":   event,
-		"payload": payload,
+		"payload": prepared,
 	}, nil)
 }
 

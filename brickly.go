@@ -273,6 +273,15 @@ func (p *Runtime) handleInvoke(msg rawMessage) {
 			})
 			return
 		}
+		result, err = prepareResourceValue(result)
+		if err != nil {
+			p.transport.send(map[string]any{
+				"type":  "command.error",
+				"id":    reqID,
+				"error": errorToPayload(err),
+			})
+			return
+		}
 		out := map[string]any{"type": "command.result", "id": reqID}
 		if result != nil {
 			out["result"] = result
@@ -328,12 +337,12 @@ func (p *Runtime) handleEventNotify(msg rawMessage) {
 		}
 	}
 
-	p.Events.dispatch(event, unwrapEventResource(hydrateResourceValue(payloadRaw, p.transport, 0)), msg.Raw)
+	p.Events.dispatch(event, unwrapEventResource(payloadRaw, p.transport), msg.Raw)
 }
 
-func unwrapEventResource(value any) any {
+func unwrapEventResource(value any, transport *transport) any {
 	if envelope, ok := value.(map[string]any); ok && envelope["encoding"] == "json" {
-		if resource, ok := envelope["resource"].(*ResourceHandle); ok {
+		if resource, ok := hydrateResourceValue(envelope["resource"], transport, 0).(*ResourceHandle); ok {
 			return resource
 		}
 	}

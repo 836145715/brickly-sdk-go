@@ -1,7 +1,5 @@
 package brickly
 
-import "encoding/json"
-
 // SessionOption 配置跨 Brick 会话。默认使用目标 Brick 的默认 Profile。
 type SessionOption func(*sessionOptions)
 
@@ -72,11 +70,15 @@ func (s *BrickSession) Invoke(commandID string, input any, into any) error {
 	if s.parentRequestID == "" || !s.runtime.isCommandActive(s.parentRequestID) {
 		return parentInvocationRequired("session.Invoke must run inside an active command handler")
 	}
+	prepared, err := prepareResourceValue(input)
+	if err != nil {
+		return err
+	}
 	msg := map[string]any{
 		"type":            "host.session.invoke",
 		"sessionId":       s.ID,
 		"commandId":       commandID,
-		"input":           dehydrateResourceValue(input),
+		"input":           prepared,
 		"parentRequestId": s.parentRequestID,
 	}
 	if tm := s.trace.asMap(); tm != nil {
@@ -85,16 +87,7 @@ func (s *BrickSession) Invoke(commandID string, input any, into any) error {
 	if into == nil {
 		return s.runtime.transport.hostCall(msg, nil)
 	}
-	var raw any
-	if err := s.runtime.transport.hostCall(msg, &raw); err != nil {
-		return err
-	}
-	value := hydrateResourceValue(raw, s.runtime.transport, 0)
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, into)
+	return s.runtime.transport.hostCall(msg, into)
 }
 
 // InvokeResource 在会话中调用并始终返回 ResourceHandle。
@@ -102,7 +95,11 @@ func (s *BrickSession) InvokeResource(commandID string, input any) (*ResourceHan
 	if s.parentRequestID == "" || !s.runtime.isCommandActive(s.parentRequestID) {
 		return nil, parentInvocationRequired("session.InvokeResource 必须在有效 command handler 内调用")
 	}
-	msg := map[string]any{"type": "host.session.invoke", "sessionId": s.ID, "commandId": commandID, "input": dehydrateResourceValue(input), "parentRequestId": s.parentRequestID, "resultMode": "resource"}
+	prepared, err := prepareResourceValue(input)
+	if err != nil {
+		return nil, err
+	}
+	msg := map[string]any{"type": "host.session.invoke", "sessionId": s.ID, "commandId": commandID, "input": prepared, "parentRequestId": s.parentRequestID, "resultMode": "resource"}
 	if tm := s.trace.asMap(); tm != nil {
 		msg["trace"] = tm
 	}
@@ -123,12 +120,16 @@ func (s *BrickSession) InvokeStream(commandID string, input any) (<-chan InvokeS
 	if s.parentRequestID == "" || !s.runtime.isCommandActive(s.parentRequestID) {
 		return failedInvokeStream(parentInvocationRequired("session.InvokeStream 必须在有效 command handler 内调用"))
 	}
+	prepared, err := prepareResourceValue(input)
+	if err != nil {
+		return failedInvokeStream(err)
+	}
 	msg := map[string]any{
 		"type":            "host.session.invoke",
 		"id":              s.runtime.transport.nextID(),
 		"sessionId":       s.ID,
 		"commandId":       commandID,
-		"input":           dehydrateResourceValue(input),
+		"input":           prepared,
 		"parentRequestId": s.parentRequestID,
 		"stream":          true,
 	}

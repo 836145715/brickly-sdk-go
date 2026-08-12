@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -30,6 +32,17 @@ type ResourceCreateOptions struct {
 	Name              string
 	TTLMillis         int64
 	ExpectedSizeBytes int64
+}
+
+// OpenResource 校验并绑定已有 ResourceRef。该操作是惰性的，不会打开宿主资源流。
+func (p *Runtime) OpenResource(ref ResourceRef) (*ResourceHandle, error) {
+	if p == nil || p.transport == nil {
+		return nil, NewBppError("INTERNAL_ERROR", "resource transport is unavailable")
+	}
+	if !validTypedResourceRef(ref) {
+		return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
+	}
+	return newResourceHandle(p.transport, ref), nil
 }
 
 func (p *Runtime) CreateResource(content any, options *ResourceCreateOptions) (*ResourceHandle, error) {
@@ -342,10 +355,11 @@ func isResourceRef(value any) bool {
 	kind, _ := ref["kind"].(string)
 	resourceID, idOK := ref["resourceId"].(string)
 	token, tokenOK := ref["accessToken"].(string)
-	_, shaOK := ref["sha256"].(string)
-	sizeOK := resourceNumber(ref["sizeBytes"])
-	expiresOK := resourceNumber(ref["expiresAt"])
-	return kind == "brickly.resource" && idOK && resourceID != "" && tokenOK && token != "" && shaOK && sizeOK && expiresOK
+	sha, shaOK := ref["sha256"].(string)
+	size, sizeOK := resourceInt64(ref["sizeBytes"])
+	expiresAt, expiresOK := resourceInt64(ref["expiresAt"])
+	return kind == "brickly.resource" && idOK && resourceID != "" && tokenOK && token != "" &&
+		shaOK && sha != "" && sizeOK && size >= 0 && expiresOK && expiresAt > 0
 }
 
 func validTypedResourceRef(ref ResourceRef) bool {
@@ -357,13 +371,43 @@ func validTypedResourceRef(ref ResourceRef) bool {
 		ref.ExpiresAt > 0
 }
 
-func resourceNumber(value any) bool {
-	switch value.(type) {
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
-		return true
-	default:
-		return false
+func resourceInt64(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		return int64(number), true
+	case int8:
+		return int64(number), true
+	case int16:
+		return int64(number), true
+	case int32:
+		return int64(number), true
+	case int64:
+		return number, true
+	case uint:
+		if uint64(number) <= uint64(^uint64(0)>>1) {
+			return int64(number), true
+		}
+	case uint8:
+		return int64(number), true
+	case uint16:
+		return int64(number), true
+	case uint32:
+		return int64(number), true
+	case uint64:
+		if number <= uint64(^uint64(0)>>1) {
+			return int64(number), true
+		}
+	case float32:
+		converted := int64(number)
+		return converted, float32(converted) == number
+	case float64:
+		converted := int64(number)
+		return converted, float64(converted) == number
+	case json.Number:
+		converted, err := number.Int64()
+		return converted, err == nil
 	}
+	return 0, false
 }
 
 func hydrateResourceValue(value any, transport *transport, depth int) any {
@@ -398,33 +442,172 @@ func hydrateResourceValue(value any, transport *transport, depth int) any {
 	}
 }
 
-func dehydrateResourceValue(value any) any {
-	return dehydrateResourceValueDepth(value, 0)
+func prepareResourceValue(value any) (any, error) {
+	return prepareResourceReflectValue(reflect.ValueOf(value), 0)
 }
 
-func dehydrateResourceValueDepth(value any, depth int) any {
-	if depth > maxResourceValueDepth || value == nil {
-		return value
+func prepareResourceReflectValue(value reflect.Value, depth int) (any, error) {
+	if depth > maxResourceValueDepth {
+		return nil, NewBppError("INVALID_PAYLOAD", "资源 payload 嵌套层级过深")
 	}
-	if handle, ok := value.(*ResourceHandle); ok {
-		return handle.Ref
+	if !value.IsValid() {
+		return nil, nil
 	}
-	switch item := value.(type) {
-	case []any:
-		out := make([]any, len(item))
-		for i, child := range item {
-			out[i] = dehydrateResourceValueDepth(child, depth+1)
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return nil, nil
 		}
-		return out
-	case map[string]any:
-		out := make(map[string]any, len(item))
-		for key, child := range item {
-			out[key] = dehydrateResourceValueDepth(child, depth+1)
+		return prepareResourceReflectValue(value.Elem(), depth+1)
+	}
+	if value.CanInterface() {
+		if handle, ok := value.Interface().(*ResourceHandle); ok {
+			if handle == nil {
+				return nil, nil
+			}
+			if !validTypedResourceRef(handle.Ref) {
+				return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
+			}
+			return resourceRefPayload(handle.Ref), nil
 		}
-		return out
+		if ref, ok := value.Interface().(ResourceRef); ok {
+			if !validTypedResourceRef(ref) {
+				return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
+			}
+			return resourceRefPayload(ref), nil
+		}
+		if ref, ok := value.Interface().(*ResourceRef); ok {
+			if ref == nil {
+				return nil, nil
+			}
+			if !validTypedResourceRef(*ref) {
+				return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
+			}
+			return resourceRefPayload(*ref), nil
+		}
+	}
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil, nil
+		}
+		if value.CanInterface() {
+			if _, ok := value.Interface().(json.Marshaler); ok {
+				return value.Interface(), nil
+			}
+		}
+		return prepareResourceReflectValue(value.Elem(), depth+1)
+	}
+	if value.CanInterface() {
+		if _, ok := value.Interface().(json.Marshaler); ok {
+			return value.Interface(), nil
+		}
+	}
+
+	switch value.Kind() {
+	case reflect.Slice:
+		if value.IsNil() {
+			return nil, nil
+		}
+		if value.Type().Elem().Kind() == reflect.Uint8 {
+			return value.Interface(), nil
+		}
+		fallthrough
+	case reflect.Array:
+		out := make([]any, value.Len())
+		for i := 0; i < value.Len(); i++ {
+			prepared, err := prepareResourceReflectValue(value.Index(i), depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = prepared
+		}
+		return out, nil
+	case reflect.Map:
+		if value.IsNil() {
+			return nil, nil
+		}
+		if value.Type().Key().Kind() != reflect.String {
+			return nil, NewBppError("INVALID_PAYLOAD", "资源 payload 的 map key 必须是字符串")
+		}
+		out := make(map[string]any, value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			prepared, err := prepareResourceReflectValue(iterator.Value(), depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[iterator.Key().String()] = prepared
+		}
+		if out["kind"] == "brickly.resource" && !isResourceRef(out) {
+			return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
+		}
+		return out, nil
+	case reflect.Struct:
+		out := make(map[string]any)
+		typeInfo := value.Type()
+		for index := 0; index < value.NumField(); index++ {
+			fieldInfo := typeInfo.Field(index)
+			if fieldInfo.PkgPath != "" {
+				continue
+			}
+			tag := fieldInfo.Tag.Get("json")
+			parts := strings.Split(tag, ",")
+			if parts[0] == "-" {
+				continue
+			}
+			name := parts[0]
+			if name == "" {
+				name = fieldInfo.Name
+			}
+			field := value.Field(index)
+			if hasJSONOption(parts[1:], "omitempty") && field.IsZero() {
+				continue
+			}
+			prepared, err := prepareResourceReflectValue(field, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[name] = prepared
+		}
+		if out["kind"] == "brickly.resource" && !isResourceRef(out) {
+			return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
+		}
+		return out, nil
+	case reflect.String:
+		return value.String(), nil
+	case reflect.Bool:
+		return value.Bool(), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return value.Int(), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return value.Uint(), nil
+	case reflect.Float32, reflect.Float64:
+		return value.Float(), nil
 	default:
-		return value
+		return nil, NewBppError("INVALID_PAYLOAD", "资源 payload 包含无法编码的值")
 	}
+}
+
+func resourceRefPayload(ref ResourceRef) map[string]any {
+	out := map[string]any{
+		"kind": ref.Kind, "resourceId": ref.ResourceID, "accessToken": ref.AccessToken,
+		"sizeBytes": ref.SizeBytes, "sha256": ref.SHA256, "expiresAt": ref.ExpiresAt,
+	}
+	if ref.MimeType != "" {
+		out["mimeType"] = ref.MimeType
+	}
+	if ref.Name != "" {
+		out["name"] = ref.Name
+	}
+	return out
+}
+
+func hasJSONOption(options []string, expected string) bool {
+	for _, option := range options {
+		if option == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // ResourceHandle 提供带背压的 io.ReadCloser 资源读取。

@@ -29,7 +29,11 @@ func TestSharedFixtureOnlyTransfersResourceRefAcrossGoHops(t *testing.T) {
 	if _, ok := hydrated.(map[string]any)["source"].(*ResourceHandle); !ok {
 		t.Fatal("shared ResourceRef was not hydrated")
 	}
-	roundTrip, err := json.Marshal(dehydrateResourceValue(hydrated))
+	prepared, err := prepareResourceValue(hydrated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := json.Marshal(prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,20 +50,215 @@ func testResourceRef(id string, size int64) ResourceRef {
 	return ResourceRef{Kind: "brickly.resource", ResourceID: id, AccessToken: "secret", SizeBytes: size, SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ExpiresAt: 2_000_000_000_000, MimeType: "text/plain", Name: "result.txt"}
 }
 
-func TestCommandContextHydrateResourceBindsCommandInputRefToTransport(t *testing.T) {
-	p, _, _ := newTestRuntime(t, nil)
-	ctx := newCommandContext(p, "request-1", "consume", CommandInvocationContext{}, nil)
+func TestRuntimeOpenResourceIsLazyAndReturnsIndependentHandles(t *testing.T) {
+	p, _, out := newTestRuntime(t, nil)
+	ref := testResourceRef("go-open", 3)
 
-	handle, err := ctx.HydrateResource(testResourceRef("input-resource", 3))
+	first, err := p.OpenResource(ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if handle.Ref.ResourceID != "input-resource" || handle.transport != p.transport {
-		t.Fatalf("unexpected hydrated handle: %+v", handle)
+	second, err := p.OpenResource(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first.transport != p.transport || second.transport != p.transport {
+		t.Fatalf("unexpected opened handles: first=%p second=%p", first, second)
+	}
+	consumed := 0
+	if message, ok := readLineWithin(t, out, &consumed, 50*time.Millisecond); ok {
+		t.Fatalf("OpenResource must not send a host request: %+v", message)
+	}
+	_, err = p.OpenResource(ResourceRef{Kind: "brickly.resource"})
+	assertBppErrorCode(t, err, "INVALID_RESOURCE_REF")
+}
+
+func TestEventsPublishDehydratesNestedResourceHandlesWithToken(t *testing.T) {
+	p, in, out := newTestRuntime(t, nil)
+	ref := testResourceRef("go-event", 3)
+	handle := newResourceHandle(p.transport, ref)
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Events.Publish("file:ready", map[string]any{
+			"nested": []any{map[string]any{"file": handle}},
+		})
+	}()
+
+	consumed := 0
+	request := readNextLine(t, out, &consumed)
+	payload := request["payload"].(map[string]any)
+	nested := payload["nested"].([]any)
+	file := nested[0].(map[string]any)["file"].(map[string]any)
+	if request["type"] != "host.event.publish" || file["accessToken"] != "secret" {
+		t.Fatalf("unexpected event resource payload: %+v", request)
+	}
+	writeLine(t, in, map[string]any{"type": "host.result", "id": request["id"], "result": nil})
+	in.Flush()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 
-	_, err = ctx.HydrateResource(ResourceRef{Kind: "brickly.resource"})
-	assertBppErrorCode(t, err, "PROTOCOL_ERROR")
+	err := p.Events.Publish("file:broken", map[string]any{
+		"file": map[string]any{"kind": "brickly.resource", "resourceId": "broken"},
+	})
+	assertBppErrorCode(t, err, "INVALID_RESOURCE_REF")
+}
+
+type typedResourcePayload struct {
+	Files  []ResourceRef              `json:"files"`
+	Nested map[string]*ResourceHandle `json:"nested"`
+	Bad    any                        `json:"bad,omitempty"`
+}
+
+func TestPrepareResourceValueHandlesTypedContainersAndRejectsMalformedRefs(t *testing.T) {
+	ref := testResourceRef("typed-resource", 3)
+	payload := typedResourcePayload{
+		Files:  []ResourceRef{ref},
+		Nested: map[string]*ResourceHandle{"file": newResourceHandle(nil, ref)},
+	}
+	prepared, err := prepareResourceValue(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, ok := prepared.(map[string]any)
+	if !ok {
+		t.Fatalf("typed struct must be explicitly prepared as a map, got %T", prepared)
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(encoded), `"accessToken":"secret"`) != 2 {
+		t.Fatalf("typed resources were not preserved as complete refs: %s", encoded)
+	}
+
+	payload.Bad = map[string]any{"kind": "brickly.resource", "resourceId": "broken"}
+	_, err = prepareResourceValue(payload)
+	assertBppErrorCode(t, err, "INVALID_RESOURCE_REF")
+}
+
+func TestInvokeRootRejectsMalformedResourceBeforeSending(t *testing.T) {
+	p, in, out := newTestRuntime(t, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- p.InvokeRoot(
+			"com.target",
+			"run",
+			map[string]any{"file": map[string]any{"kind": "brickly.resource", "resourceId": "broken"}},
+			nil,
+		)
+	}()
+	consumed := 0
+	select {
+	case err := <-done:
+		assertBppErrorCode(t, err, "INVALID_RESOURCE_REF")
+		if message, ok := readLineWithin(t, out, &consumed, 50*time.Millisecond); ok {
+			t.Fatalf("invalid payload must not reach Host: %+v", message)
+		}
+	case <-time.After(100 * time.Millisecond):
+		request := readNextLine(t, out, &consumed)
+		writeLine(t, in, map[string]any{"type": "host.result", "id": request["id"], "result": nil})
+		in.Flush()
+		<-done
+		t.Fatalf("invalid payload reached Host: %+v", request)
+	}
+}
+
+func TestCommandOutputAndChunkPrepareTypedResourcesAndRejectMalformedRefs(t *testing.T) {
+	p, _, out := newTestRuntime(t, nil)
+	ctx := newCommandContext(p, "request-output", "stream", CommandInvocationContext{}, nil)
+	ref := testResourceRef("command-resource", 3)
+	payload := typedResourcePayload{
+		Files:  []ResourceRef{ref},
+		Nested: map[string]*ResourceHandle{"file": newResourceHandle(nil, ref)},
+	}
+	if err := ctx.Output("summary", payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Chunk("items", payload); err != nil {
+		t.Fatal(err)
+	}
+	consumed := 0
+	output := readNextLine(t, out, &consumed)
+	chunk := readNextLine(t, out, &consumed)
+	if output["value"].(map[string]any)["files"].([]any)[0].(map[string]any)["accessToken"] != "secret" {
+		t.Fatalf("output lost complete ResourceRef: %+v", output)
+	}
+	if chunk["chunk"].(map[string]any)["nested"].(map[string]any)["file"].(map[string]any)["accessToken"] != "secret" {
+		t.Fatalf("chunk lost complete ResourceRef: %+v", chunk)
+	}
+	malformed := map[string]any{"kind": "brickly.resource", "resourceId": "broken"}
+	assertBppErrorCode(t, ctx.Output("bad", malformed), "INVALID_RESOURCE_REF")
+	assertBppErrorCode(t, ctx.Chunk("bad", malformed), "INVALID_RESOURCE_REF")
+	if message, ok := readLineWithin(t, out, &consumed, 50*time.Millisecond); ok {
+		t.Fatalf("invalid output reached Host: %+v", message)
+	}
+}
+
+func TestCommandResultRejectsMalformedResource(t *testing.T) {
+	_, in, out := newTestRuntime(t, func(p *Runtime) {
+		p.OnCommand("broken-result", func(_ *CommandContext, _ json.RawMessage) (any, error) {
+			return map[string]any{
+				"resource": map[string]any{"kind": "brickly.resource", "resourceId": "broken"},
+			}, nil
+		})
+	})
+	writeLine(t, in, map[string]any{
+		"type": "command.invoke", "id": "request-broken-result", "commandId": "broken-result", "input": nil,
+	})
+	in.Flush()
+	consumed := 0
+	message := readNextLine(t, out, &consumed)
+	if message["type"] != "command.error" {
+		t.Fatalf("expected command.error, got %+v", message)
+	}
+	errorPayload := message["error"].(map[string]any)
+	if errorPayload["code"] != "INVALID_RESOURCE_REF" {
+		t.Fatalf("unexpected command error: %+v", errorPayload)
+	}
+}
+
+func TestEventsOnOnlyHydratesOuterResourceEnvelope(t *testing.T) {
+	p, _, _ := newTestRuntime(t, nil)
+	ref := testResourceRef("go-event-result", 3)
+	encoded, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source map[string]any
+	if err := json.Unmarshal(encoded, &source); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan any, 2)
+	p.Events.On("file:ready", func(payload any, _ EventEnvelope) {
+		received <- payload
+	})
+	common := map[string]any{
+		"type": "event.notify", "event": "file:ready",
+		"sourceBrickId": "com.test.publisher", "publishedAt": "now",
+	}
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: mergeEventPayload(common, map[string]any{"nested": []any{source}})})
+	first := <-received
+	nested := first.(map[string]any)["nested"].([]any)
+	if _, ok := nested[0].(map[string]any); !ok {
+		t.Fatalf("nested business ResourceRef must stay a map, got %T", nested[0])
+	}
+
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: mergeEventPayload(common, map[string]any{"encoding": "json", "resource": source})})
+	second := <-received
+	handle, ok := second.(*ResourceHandle)
+	if !ok || handle.Ref.ResourceID != ref.ResourceID {
+		t.Fatalf("outer resource envelope must become ResourceHandle, got %#v", second)
+	}
+}
+
+func mergeEventPayload(common map[string]any, payload any) map[string]any {
+	message := make(map[string]any, len(common)+1)
+	for key, value := range common {
+		message[key] = value
+	}
+	message["payload"] = payload
+	return message
 }
 
 func TestCommandContextCreateResourceWriterSendsParentRequestID(t *testing.T) {
@@ -572,7 +771,11 @@ func TestResourceHandleSaveTextJSONAndLimit(t *testing.T) {
 
 func TestResourceRefNestedInputSerializesOnlyReference(t *testing.T) {
 	h := newResourceHandle(nil, testResourceRef("nested", 1))
-	encoded, err := json.Marshal(dehydrateResourceValue(map[string]any{"resource": h}))
+	prepared, err := prepareResourceValue(map[string]any{"resource": h})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(prepared)
 	if err != nil {
 		t.Fatal(err)
 	}

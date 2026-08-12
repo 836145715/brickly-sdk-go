@@ -69,18 +69,6 @@ func (c *CommandContext) IsCancelled() bool {
 	return c.runtime.cancelled[c.RequestID]
 }
 
-// HydrateResource 将 command 原始 JSON 输入中解码出的 ResourceRef 绑定为可读句柄。
-// Go handler 为保持兼容仍接收 json.RawMessage，因此需要在解码 Ref 后显式调用一次。
-func (c *CommandContext) HydrateResource(ref ResourceRef) (*ResourceHandle, error) {
-	if c == nil || c.runtime == nil || c.runtime.transport == nil {
-		return nil, NewBppError("INTERNAL_ERROR", "command resource transport is unavailable")
-	}
-	if !validTypedResourceRef(ref) {
-		return nil, NewBppError("PROTOCOL_ERROR", "ResourceRef 格式无效")
-	}
-	return newResourceHandle(c.runtime.transport, ref), nil
-}
-
 // CreateResource 创建绑定当前 command 生命周期的资源。
 func (c *CommandContext) CreateResource(content any, options *ResourceCreateOptions) (*ResourceHandle, error) {
 	return c.runtime.createResource(content, options, c.RequestID)
@@ -106,17 +94,27 @@ func (c *CommandContext) Progress(value float64, message string) {
 }
 
 // Output 发送一次性 command.output（相同 name 后者覆盖前者）。
-func (c *CommandContext) Output(name string, value any) {
+func (c *CommandContext) Output(name string, value any) error {
+	prepared, err := prepareResourceValue(value)
+	if err != nil {
+		return err
+	}
 	c.runtime.transport.send(map[string]any{
-		"type": "command.output", "id": c.RequestID, "name": name, "value": dehydrateResourceValue(value),
+		"type": "command.output", "id": c.RequestID, "name": name, "value": prepared,
 	})
+	return nil
 }
 
 // Chunk 向具名输出追加流式片段（前端按顺序拼接）。
-func (c *CommandContext) Chunk(name string, chunk any) {
+func (c *CommandContext) Chunk(name string, chunk any) error {
+	prepared, err := prepareResourceValue(chunk)
+	if err != nil {
+		return err
+	}
 	c.runtime.transport.send(map[string]any{
-		"type": "command.chunk", "id": c.RequestID, "name": name, "chunk": dehydrateResourceValue(chunk),
+		"type": "command.chunk", "id": c.RequestID, "name": name, "chunk": prepared,
 	})
+	return nil
 }
 
 // UI 返回当前 command 作用域下的 UI 门面。
