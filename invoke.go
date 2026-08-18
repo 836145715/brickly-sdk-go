@@ -32,45 +32,15 @@ func parentInvocationRequired(message string) *BppError {
 	return NewBppError("PARENT_INVOCATION_REQUIRED", message)
 }
 
-// Invoke 跨 Brick 调用命令。必须在 CommandContext.Invoke 中作为 child invocation 使用；
-// command 外请使用 InvokeRoot 发起 root invocation。
-func (p *Runtime) Invoke(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
-	options := collectInvokeOptions(opts)
-	if options.parentRequestID == "" {
-		return parentInvocationRequired("Invoke must run through CommandContext; use InvokeRoot for root calls")
+func (p *Runtime) invokeResourceWithType(msgType string, dependencyAlias string, ref BrickRef, commandID string, input any, options invokeOptions) (*ResourceHandle, error) {
+	if err := validateBrickRef(ref); err != nil {
+		return nil, err
 	}
-	return p.invokeWithType("host.invoke", brickID, commandID, input, into, options)
-}
-
-// InvokeRoot 跨 Brick 发起 root invocation，不携带 parentRequestId。
-func (p *Runtime) InvokeRoot(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
-	options := collectInvokeOptions(opts)
-	options.parentRequestID = ""
-	return p.invokeWithType("host.invokeRoot", brickID, commandID, input, into, options)
-}
-
-// InvokeResource 在命令作用域内调用并始终以 ResourceHandle 返回结果。
-func (p *Runtime) InvokeResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
-	options := collectInvokeOptions(opts)
-	if options.parentRequestID == "" {
-		return nil, parentInvocationRequired("InvokeResource must run through CommandContext")
-	}
-	return p.invokeResourceWithType("host.invoke", brickID, commandID, input, options)
-}
-
-// InvokeRootResource 发起 root 调用并始终以 ResourceHandle 返回结果。
-func (p *Runtime) InvokeRootResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
-	options := collectInvokeOptions(opts)
-	options.parentRequestID = ""
-	return p.invokeResourceWithType("host.invokeRoot", brickID, commandID, input, options)
-}
-
-func (p *Runtime) invokeResourceWithType(msgType, brickID, commandID string, input any, options invokeOptions) (*ResourceHandle, error) {
 	prepared, err := prepareResourceValue(input)
 	if err != nil {
 		return nil, err
 	}
-	msg := map[string]any{"type": msgType, "brickId": brickID, "commandId": commandID, "input": prepared, "resultMode": "resource"}
+	msg := map[string]any{"type": msgType, "dependencyAlias": dependencyAlias, "ref": ref, "commandId": commandID, "input": prepared, "resultMode": "resource"}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
 	}
@@ -92,16 +62,20 @@ func (p *Runtime) invokeResourceWithType(msgType, brickID, commandID string, inp
 	return handle, nil
 }
 
-func (p *Runtime) invokeWithType(msgType, brickID, commandID string, input any, into any, options invokeOptions) error {
+func (p *Runtime) invokeWithType(msgType string, dependencyAlias string, ref BrickRef, commandID string, input any, into any, options invokeOptions) error {
+	if err := validateBrickRef(ref); err != nil {
+		return err
+	}
 	prepared, err := prepareResourceValue(input)
 	if err != nil {
 		return err
 	}
 	msg := map[string]any{
-		"type":      msgType,
-		"brickId":   brickID,
-		"commandId": commandID,
-		"input":     prepared,
+		"type":            msgType,
+		"dependencyAlias": dependencyAlias,
+		"ref":             ref,
+		"commandId":       commandID,
+		"input":           prepared,
 	}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
@@ -130,28 +104,22 @@ type InvokeStreamEvent struct {
 	Result   json.RawMessage
 }
 
-// InvokeStream 跨 Brick 流式调用命令。返回的 channel 会按宿主事件顺序产出，
-// host.result 到达后关闭；host.error 会关闭 channel 并让错误 channel 返回 *BppError。
-func (p *Runtime) InvokeStream(brickID, commandID string, input any, opts ...InvokeOption) (<-chan InvokeStreamEvent, <-chan error) {
-	options := collectInvokeOptions(opts)
-	if options.parentRequestID == "" {
-		return failedInvokeStream(parentInvocationRequired("InvokeStream must run through CommandContext"))
+func (p *Runtime) invokeStreamWithOptions(dependencyAlias string, ref BrickRef, commandID string, input any, options invokeOptions) (<-chan InvokeStreamEvent, <-chan error) {
+	if err := validateBrickRef(ref); err != nil {
+		return failedInvokeStream(err)
 	}
-	return p.invokeStreamWithOptions(brickID, commandID, input, options)
-}
-
-func (p *Runtime) invokeStreamWithOptions(brickID, commandID string, input any, options invokeOptions) (<-chan InvokeStreamEvent, <-chan error) {
 	prepared, err := prepareResourceValue(input)
 	if err != nil {
 		return failedInvokeStream(err)
 	}
 	msg := map[string]any{
-		"type":      "host.invoke",
-		"id":        p.transport.nextID(),
-		"brickId":   brickID,
-		"commandId": commandID,
-		"input":     prepared,
-		"stream":    true,
+		"type":            "host.invoke",
+		"id":              p.transport.nextID(),
+		"dependencyAlias": dependencyAlias,
+		"ref":             ref,
+		"commandId":       commandID,
+		"input":           prepared,
+		"stream":          true,
 	}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
@@ -235,4 +203,19 @@ func errorFromRaw(value any) error {
 		e.Message = "host.error without code"
 	}
 	return &e
+}
+
+func validateBrickRef(ref BrickRef) error {
+	if ref.BrickID == "" {
+		return NewBppError("INVALID_INPUT", "BrickRef.brickId is required")
+	}
+	if ref.Version == "" {
+		return NewBppError("INVALID_INPUT", "BrickRef.version is required")
+	}
+	switch ref.Origin {
+	case BrickOriginInstalled, BrickOriginDevelopment, BrickOriginReview:
+		return nil
+	default:
+		return NewBppError("INVALID_INPUT", "BrickRef.origin is invalid")
+	}
 }

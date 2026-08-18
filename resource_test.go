@@ -139,10 +139,10 @@ func TestPrepareResourceValueHandlesTypedContainersAndRejectsMalformedRefs(t *te
 
 func TestInvokeRootRejectsMalformedResourceBeforeSending(t *testing.T) {
 	p, in, out := newTestRuntime(t, nil)
+	dependency := testDependency(t, p)
 	done := make(chan error, 1)
 	go func() {
-		done <- p.InvokeRoot(
-			"com.target",
+		done <- dependency.InvokeRoot(
 			"run",
 			map[string]any{"file": map[string]any{"kind": "brickly.resource", "resourceId": "broken"}},
 			nil,
@@ -235,7 +235,10 @@ func TestEventsOnOnlyHydratesOuterResourceEnvelope(t *testing.T) {
 	})
 	common := map[string]any{
 		"type": "event.notify", "event": "file:ready",
-		"sourceBrickId": "com.test.publisher", "publishedAt": "now",
+		"source": map[string]any{
+			"kind": "brick",
+			"ref":  map[string]any{"brickId": "com.test.publisher", "origin": "installed", "version": "1.0.0"},
+		}, "publishedAt": "now",
 	}
 	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: mergeEventPayload(common, map[string]any{"nested": []any{source}})})
 	first := <-received
@@ -290,12 +293,13 @@ func TestCommandContextCreateResourceWriterSendsParentRequestID(t *testing.T) {
 
 func TestInvokeRootResourceReturnsHandleAndRequestsResourceMode(t *testing.T) {
 	p, in, out := newTestRuntime(t, nil)
+	dependency := testDependency(t, p)
 	done := make(chan struct {
 		h *ResourceHandle
 		e error
 	}, 1)
 	go func() {
-		h, e := p.InvokeRootResource("com.target", "export", nil)
+		h, e := dependency.InvokeRootResource("export", nil)
 		done <- struct {
 			h *ResourceHandle
 			e error
@@ -305,6 +309,9 @@ func TestInvokeRootResourceReturnsHandleAndRequestsResourceMode(t *testing.T) {
 	req := readNextLine(t, out, &consumed)
 	if req["type"] != "host.invokeRoot" || req["resultMode"] != "resource" {
 		t.Fatalf("unexpected request: %+v", req)
+	}
+	if req["dependencyAlias"] != testTargetAlias || !reflect.DeepEqual(req["ref"], testTargetRefPayload()) {
+		t.Fatalf("missing exact dependency binding: %+v", req)
 	}
 	writeLine(t, in, map[string]any{"type": "host.result", "id": req["id"], "result": testResourceRef("r1", 3)})
 	in.Flush()

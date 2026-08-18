@@ -1,16 +1,23 @@
 package brickly
 
 import (
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 )
 
 // EventEnvelope 是事件回调的第二个参数，描述事件元信息。
 type EventEnvelope struct {
-	Event         string
-	Payload       any
-	SourceBrickID string
-	PublishedAt   string
+	Event       string
+	Payload     any
+	Source      EventSource
+	PublishedAt string
+}
+
+// EventSource 显式区分系统事件与携带完整身份的 Brick 事件。
+type EventSource struct {
+	Kind string    `json:"kind"`
+	Ref  *BrickRef `json:"ref,omitempty"`
 }
 
 // EventHandler 是事件订阅回调。EventBus JSON 事件的 payload 是 *ResourceHandle，
@@ -74,8 +81,15 @@ func (e *EventBus) dispatch(event string, payload any, raw map[string]any) {
 		return
 	}
 	env := EventEnvelope{Event: event, Payload: payload}
-	if s, ok := raw["sourceBrickId"].(string); ok {
-		env.SourceBrickID = s
+	if source, ok := raw["source"].(map[string]any); ok {
+		env.Source.Kind, _ = source["kind"].(string)
+		if refValue, ok := source["ref"].(map[string]any); ok {
+			encoded, _ := json.Marshal(refValue)
+			var ref BrickRef
+			if json.Unmarshal(encoded, &ref) == nil {
+				env.Source.Ref = &ref
+			}
+		}
 	}
 	if s, ok := raw["publishedAt"].(string); ok {
 		env.PublishedAt = s

@@ -58,49 +58,41 @@ SDK 自动完成：
 
 ### `Runtime`（`brickly.New(Options{...})` 返回）
 
-| 方法                                                   | 作用                                                                       |
-| ------------------------------------------------------ | -------------------------------------------------------------------------- |
-| `OnCommand(id, handler)`                               | 注册命令处理器（链式）                                                     |
-| `OnReady(fn)`                                          | runtime.ready 之后异步触发                                                 |
-| `OnShutdown(fn)`                                       | runtime.shutdown 时触发，返回后 SDK 自动发 runtime.bye 退出                |
-| `UI.CreateBrowserWindow(url, opts)`                    | 创建子窗口，返回 `*WindowHandle`                                           |
-| `UI.ListWindows()`                                     | 列出本 Brick 持有的窗口                                                    |
-| `Events.On(event, fn)`                                 | 订阅事件总线（含 `window.*` 系列），返回取消函数                           |
-| `Events.Publish(event, payload)`                       | 发布事件                                                                   |
-| `Platform.System.*` / `System.*`                       | 调用宿主系统能力（System 是便捷别名）                                      |
-| `Platform.Clipboard.*`                                 | 读取或写入系统剪贴板                                                       |
-| `Invoke(brickID, commandID, input, into, opts...)`     | command 作用域内的 child 调用底层入口；普通业务使用 `ctx.Invoke`           |
-| `InvokeRoot(brickID, commandID, input, into, opts...)` | command 外发起 root 跨 Brick 调用                                          |
-| `InvokeStream(brickID, commandID, input, opts...)`     | command 作用域内的流式 child 调用底层入口；普通业务使用 `ctx.InvokeStream` |
-| `OpenSession(brickID, opts...)`                        | 打开跨 Brick 会话；普通业务使用 `ctx.OpenSession`                          |
-| `OpenResource(ref)`                                    | 惰性绑定已有 `ResourceRef`，不立即访问 Host                                |
-| `Start()`                                              | 启动 stdin 循环（阻塞）                                                    |
-| `Debug/Info/Warn/Error(message, fields)`               | 结构化日志 → `runtime.log`（带 level，推荐）                               |
+| 方法                                               | 作用                                                                       |
+| -------------------------------------------------- | -------------------------------------------------------------------------- |
+| `OnCommand(id, handler)`                           | 注册命令处理器（链式）                                                     |
+| `OnReady(fn)`                                      | runtime.ready 之后异步触发                                                 |
+| `OnShutdown(fn)`                                   | runtime.shutdown 时触发，返回后 SDK 自动发 runtime.bye 退出                |
+| `UI.CreateBrowserWindow(url, opts)`                | 创建子窗口，返回 `*WindowHandle`                                           |
+| `UI.ListWindows()`                                 | 列出本 Brick 持有的窗口                                                    |
+| `Events.On(event, fn)`                             | 订阅事件总线（含 `window.*` 系列），返回取消函数                           |
+| `Events.Publish(event, payload)`                   | 发布事件                                                                   |
+| `Platform.System.*` / `System.*`                   | 调用宿主系统能力（System 是便捷别名）                                      |
+| `Platform.Clipboard.*`                             | 读取或写入系统剪贴板                                                       |
+| `Dependencies.Require(alias)`                      | 获取 Host 握手绑定到精确 `BrickRef` 的依赖客户端                           |
+| `OpenResource(ref)`                                | 惰性绑定已有 `ResourceRef`，不立即访问 Host                                |
+| `Start()`                                          | 启动 stdin 循环（阻塞）                                                    |
+| `Debug/Info/Warn/Error(message, fields)`           | 结构化日志 → `runtime.log`（带 level，推荐）                               |
 
 ### `CommandContext`（handler 第一个参数）
 
-| 字段 / 方法                                        | 作用                                                                                                                     |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `RequestID` / `CommandID`                          | 当前请求与命令 id                                                                                                        |
-| `Invocation`                                      | 宿主注入的可信调用来源；未提供时 `Source` 为 `unknown`                                                                   |
-| `Progress(value, message)`                         | 进度（value ∈ [0,1]）                                                                                                    |
-| `Chunk(name, chunk) error`                         | 向具名输出追加流式片段；资源引用无效或 payload 过深时返回错误                                                            |
-| `Output(name, value) error`                        | 一次性覆盖具名输出；资源引用无效或 payload 过深时返回错误                                                                |
-| `Context()`                                        | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
-| `IsCancelled()`                                    | 协作式取消轮询                                                                                                           |
-| `CreateResource(content, options)`                 | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                               |
-| `CreateResourceFrom(reader, options)`              | 从 `io.Reader` 流式创建绑定当前 command 生命周期的资源                                                                  |
-| `CreateResourceWriter(options)`                    | 创建绑定当前 command 生命周期的 store-and-forward writer                                                               |
-| `Invoke(brickID, commandID, input, into, opts...)` | 跨 Brick 调用命令，自动携带当前 `parentRequestId`，支持 `WithProfileID`                                                  |
-| `InvokeResource(brickID, commandID, input, opts...)` | 跨 Brick 调用并始终返回 `*ResourceHandle`                                                               |
-| `InvokeRoot(brickID, commandID, input, into, opts...)` | 发起独立 root 调用，携带当前 `parentRequestId` 供宿主审计                                                            |
-| `InvokeRootResource(brickID, commandID, input, opts...)` | Root 调用并始终返回 `*ResourceHandle`                                                               |
-| `InvokeStream(brickID, commandID, input, opts...)` | 跨 Brick 流式调用命令，自动携带当前 `parentRequestId`，支持 `WithProfileID`                                              |
-| `OpenSession(brickID, opts...)`                    | 打开跨 Brick 会话，支持 `WithSessionProfileID`；`session.Invoke` / `session.InvokeStream` 自动携带当前 `parentRequestId` |
-| `UI()` / `Events()`                                | 与 `Runtime.UI` / `Runtime.Events` 同源                                                                                  |
-| `Platform()` / `System()`                          | 与 `Runtime.Platform` / `Runtime.System` 同源                                                                            |
+| 字段 / 方法                                          | 作用                                                                                                                     |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `RequestID` / `CommandID`                            | 当前请求与命令 id                                                                                                        |
+| `Invocation`                                         | 宿主注入的可信调用来源；未提供时 `Source` 为 `unknown`                                                                   |
+| `Progress(value, message)`                           | 进度（value ∈ [0,1]）                                                                                                    |
+| `Chunk(name, chunk) error`                           | 向具名输出追加流式片段；资源引用无效或 payload 过深时返回错误                                                            |
+| `Output(name, value) error`                          | 一次性覆盖具名输出；资源引用无效或 payload 过深时返回错误                                                                |
+| `Context()`                                          | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
+| `IsCancelled()`                                      | 协作式取消轮询                                                                                                           |
+| `CreateResource(content, options)`                   | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                                |
+| `CreateResourceFrom(reader, options)`                | 从 `io.Reader` 流式创建绑定当前 command 生命周期的资源                                                                   |
+| `CreateResourceWriter(options)`                      | 创建绑定当前 command 生命周期的 store-and-forward writer                                                                 |
+| `Dependencies().Require(alias)`                      | 获取绑定当前 command parent、trace 与 Profile 的依赖客户端                                                               |
+| `UI()` / `Events()`                                  | 与 `Runtime.UI` / `Runtime.Events` 同源                                                                                  |
+| `Platform()` / `System()`                            | 与 `Runtime.Platform` / `Runtime.System` 同源                                                                            |
 
-`Invocation.DependencyProfiles` 为目标 Brick 指定默认 Profile。`Invoke`、`InvokeRoot`、`InvokeStream` 和 `OpenSession` 在未显式传 Profile 时自动使用该映射；`WithProfileID` / `WithSessionProfileID` 始终优先。
+`Invocation.DependencyProfiles` 按 alias 对应的精确 `BrickKey` 选择 Profile；显式 Profile 始终优先。
 
 资源调用返回 `*ResourceHandle`，实现 `io.ReadCloser`，按块读取宿主资源并提供 `Text()`、`JSON(out)`、`SaveTo(path)`、`Revoke()`。资源超过 200 MiB 时不能整体物化，应使用流读取或直接保存到文件；将句柄再次作为输入时 SDK 只传递 `ResourceRef`。
 
@@ -181,12 +173,13 @@ stdout 仅写协议；ready 后仍写裸 stderr 会被宿主记为 `[stderr] …
 
 ## 跨 Brick 调用
 
-普通 Brick 在 command handler 内调用其它 Brick 命令时只需要 `ctx.Invoke`。SDK 会自动携带当前请求的 `parentRequestId`，宿主会把子调用挂到同一 invocation graph 下，并自动启动、复用和回收目标 Brick 实例。目标 Brick 需要配置时，用 `WithProfileID` 指定目标 Brick Profile；不传则使用目标 Brick 默认 Profile。
+业务代码只使用 manifest alias；精确来源和版本由 Host 握手绑定，SDK 不回退或猜测。
 
 ```go
+openAI, err := ctx.Dependencies().Require("openai")
+if err != nil { return nil, err }
 var out map[string]any
-err := ctx.Invoke(
-    "com.brickly.openai",
+err = openAI.Invoke(
     "chat",
     map[string]any{"prompt": "hello"},
     &out,
@@ -198,7 +191,12 @@ err := ctx.Invoke(
 
 ```json
 "dependencies": {
-  "com.brickly.openai": {
+  "openai": {
+    "target": {
+      "brickId": "com.brickly.openai",
+      "origin": "installed",
+      "version": "2.1.0"
+    },
     "commands": ["chat"]
   }
 }
@@ -207,9 +205,10 @@ err := ctx.Invoke(
 如果需要在 command 外主动创建顶级调用，使用显式 root API：
 
 ```go
+openAI, err := p.Dependencies.Require("openai")
+if err != nil { return err }
 var out map[string]any
-err := p.InvokeRoot(
-    "com.brickly.openai",
+err = openAI.InvokeRoot(
     "chat",
     map[string]any{"prompt": "hello"},
     &out,
@@ -222,8 +221,9 @@ err := p.InvokeRoot(
 目标命令会产生 `progress`、`chunk`、`output` 等流式事件时，使用 `InvokeStream`。SDK 会发送 `host.invoke` 且带上 `stream: true`，然后按宿主返回顺序产出事件，最终 `host.result` 会变成 `Type == "result"` 的事件。
 
 ```go
-events, errs := ctx.InvokeStream(
-    "com.brickly.openai",
+openAI, err := ctx.Dependencies().Require("openai")
+if err != nil { return nil, err }
+events, errs := openAI.InvokeStream(
     "chat-completions",
     map[string]any{"stream": true, "messages": messages},
     brickly.WithProfileID("work"),
@@ -247,10 +247,12 @@ if err := <-errs; err != nil {
 
 ## 跨 Brick 会话
 
-当目标 Brick 实例内部有状态，需要在多次命令调用之间保留上下文时，在 command handler 内使用 `ctx.OpenSession`。同一个 session 的后续 `Invoke` / `InvokeStream` 会落到同一个目标 Brick 实例；每次调用都会携带创建它且仍在执行的 command `parentRequestId`。调用 `Close()`、调用方 Brick 实例退出或宿主回收调用方时，会话会结束。
+当目标 Brick 实例内部有状态时，从依赖客户端打开 session。
 
 ```go
-session, err := ctx.OpenSession("com.brickly.openai", brickly.WithSessionProfileID("work"))
+openAI, err := ctx.Dependencies().Require("openai")
+if err != nil { return nil, err }
+session, err := openAI.OpenSession(brickly.WithSessionProfileID("work"))
 if err != nil {
     return nil, err
 }
@@ -564,7 +566,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/bpp.schema.json`](../../../specs/bpp.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.3.1`（`SdkVersion`）；BPP 协议版本：`0.2.0`；窗口使用五条 `host.ui.window.*` 消息和 105 个反射方法
+- 当前 SDK 版本：`0.5.0`（`SdkVersion`）；BPP 协议版本：`0.4.0`
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
 ---
@@ -595,13 +597,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.3.1
+npm run sdk:go:publish -- 0.5.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.3.1 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.5.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -609,14 +611,14 @@ npm run sdk:go:publish -- 0.3.1 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.3.1`
-- `git push origin <branch>` 和 `git push origin v0.3.1`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.3.1` 触发 Go module 缓存
+- `git tag -a v0.5.0`
+- `git push origin <branch>` 和 `git push origin v0.5.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.5.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.3.1
+go get github.com/836145715/brickly-sdk-go@v0.5.0
 ```
 
 ---

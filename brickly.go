@@ -27,7 +27,7 @@ import (
 
 // Options 是 New 的可选配置。
 type Options struct {
-	// 必填：Brick id，用于协议请求 id 与 runtime.ready 身份（要与 manifest.json 的 id 一致）。
+	// 必填：Brick id，仅用于生成协议请求 id 前缀；Runtime 身份由宿主 manifest 决定。
 	BrickID string
 	// 可选：协议版本。默认 ProtocolVersion。
 	ProtocolVersion string
@@ -60,11 +60,12 @@ type Runtime struct {
 
 	// UI / Events / Platform 与 Node SDK 的 brick.ui / brick.events /
 	// brick.platform 同源。System 是 Platform.System 的便捷别名。
-	UI       *UI
-	Events   *EventBus
-	Platform *PlatformAPI
-	System   *SystemAPI
-	Config   map[string]any
+	UI           *UI
+	Events       *EventBus
+	Platform     *PlatformAPI
+	System       *SystemAPI
+	Dependencies *DependencyRegistry
+	Config       map[string]any
 
 	mu              sync.RWMutex
 	commandHandlers map[string]CommandHandler
@@ -114,6 +115,7 @@ func New(opts Options) *Runtime {
 	p.Events = &EventBus{runtime: p}
 	p.Platform = newPlatformAPI(p, nil)
 	p.System = p.Platform.System
+	p.Dependencies = newDependencyRegistry(p)
 	p.Config = map[string]any{}
 	return p
 }
@@ -199,6 +201,11 @@ func (p *Runtime) dispatch(msg rawMessage) {
 }
 
 func (p *Runtime) handleHello(msg rawMessage) {
+	if err := p.Dependencies.replace(msg.Raw["dependencyBindings"]); err != nil {
+		p.Error("invalid host.hello dependency bindings", err, nil)
+		p.signalDone()
+		return
+	}
 	if config, ok := msg.Raw["config"].(map[string]any); ok {
 		p.mu.Lock()
 		p.Config = config
@@ -207,7 +214,6 @@ func (p *Runtime) handleHello(msg rawMessage) {
 	p.transport.send(map[string]any{
 		"type":            "runtime.ready",
 		"protocolVersion": p.protocolVersion,
-		"brickId":         p.brickID,
 	})
 	p.mu.RLock()
 	fn := p.readyHandler

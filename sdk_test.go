@@ -8,11 +8,67 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+var testTargetRef = BrickRef{
+	BrickID: "com.target",
+	Origin:  BrickOriginInstalled,
+	Version: "1.0.0",
+}
+
+const testTargetAlias = "target"
+
+func testDependency(t *testing.T, runtime *Runtime) *DependencyClient {
+	t.Helper()
+	if err := runtime.Dependencies.replace(BrickDependencyBindings{testTargetAlias: testTargetRef}); err != nil {
+		t.Fatal(err)
+	}
+	dependency, err := runtime.Dependencies.Require(testTargetAlias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dependency
+}
+
+func testTargetRefPayload() map[string]any {
+	return map[string]any{
+		"brickId": testTargetRef.BrickID,
+		"origin":  string(testTargetRef.Origin),
+		"version": testTargetRef.Version,
+	}
+}
+
+func TestDependencyBindingsIsolateSameIDVersionsAndReturnCopies(t *testing.T) {
+	p := New(Options{BrickID: "com.test.dependencies", Stdin: strings.NewReader("")})
+	reviewRef := BrickRef{BrickID: testTargetRef.BrickID, Origin: BrickOriginReview, Version: "2.0.0"}
+	if err := p.Dependencies.replace(BrickDependencyBindings{
+		"installed_tool": testTargetRef,
+		"review_tool":    reviewRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := p.Dependencies.Require("installed_tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := p.Dependencies.Require("review_tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.Ref() != testTargetRef || review.Ref() != reviewRef {
+		t.Fatalf("bindings were not isolated: installed=%+v review=%+v", installed.Ref(), review.Ref())
+	}
+	copyBindings := p.Dependencies.Bindings()
+	copyBindings["review_tool"] = testTargetRef
+	if p.Dependencies.Bindings()["review_tool"] != reviewRef {
+		t.Fatal("Bindings exposed mutable internal state")
+	}
+}
 
 // —— 测试基础设施 ——
 //
@@ -79,6 +135,14 @@ func readLineWithin(t *testing.T, out *threadSafeBuffer, consumed *int, timeout 
 
 func writeLine(t *testing.T, w io.Writer, msg any) {
 	t.Helper()
+	if value, ok := msg.(map[string]any); ok && value["type"] == "host.hello" {
+		if _, exists := value["protocolVersion"]; !exists {
+			value["protocolVersion"] = ProtocolVersion
+		}
+		if _, exists := value["dependencyBindings"]; !exists {
+			value["dependencyBindings"] = BrickDependencyBindings{testTargetAlias: testTargetRef}
+		}
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +204,7 @@ func TestHelloAndReady(t *testing.T) {
 	})
 
 	writeLine(t, in, map[string]any{
-		"type": "host.hello", "hostVersion": "test", "protocolVersion": "0.2.0",
+		"type": "host.hello", "hostVersion": "test", "protocolVersion": ProtocolVersion,
 	})
 	in.Flush()
 
@@ -149,8 +213,8 @@ func TestHelloAndReady(t *testing.T) {
 	if msg["type"] != "runtime.ready" {
 		t.Fatalf("expected runtime.ready, got %v", msg["type"])
 	}
-	if msg["brickId"] != "com.test" {
-		t.Fatalf("unexpected brickId: %v", msg["brickId"])
+	if _, ok := msg["brickId"]; ok {
+		t.Fatalf("runtime.ready must not carry brickId: %v", msg["brickId"])
 	}
 
 	select {
@@ -228,7 +292,7 @@ func TestTransportHostDisconnectRejectsPendingCalls(t *testing.T) {
 		id := transport.nextID()
 		events := transport.registerStream(id)
 		transport.send(map[string]any{
-			"type": "host.invoke", "id": id, "brickId": "com.target", "commandId": "run", "stream": true,
+			"type": "host.invoke", "id": id, "ref": testTargetRef, "commandId": "run", "stream": true,
 		})
 		consumed := 0
 		_ = readNextLine(t, out, &consumed)
@@ -594,7 +658,7 @@ func TestRuntimeEndDisposesAllWindowHandles(t *testing.T) {
 	if windowCount != 0 || handlerCount != 0 || !handle.IsClosed() || handle.runtime != nil {
 		t.Fatalf("windowCount=%d handlerCount=%d closed=%v runtime=%v", windowCount, handlerCount, handle.IsClosed(), handle.runtime)
 	}
-	if ProtocolVersion != "0.2.0" {
+	if ProtocolVersion != "0.4.0" {
 		t.Fatalf("ProtocolVersion=%s", ProtocolVersion)
 	}
 }
@@ -643,11 +707,12 @@ func TestWindowHandleWrappers(t *testing.T) {
 
 func TestRuntimeInvokeOutsideCommandRequiresRootAPI(t *testing.T) {
 	p, in, out := newTestRuntime(t, nil)
+	dependency := testDependency(t, p)
 	done := make(chan error, 1)
 	var result map[string]any
 
 	go func() {
-		done <- p.Invoke("com.target", "run", nil, &result)
+		done <- dependency.Invoke("run", nil, &result)
 	}()
 
 	consumed := 0
@@ -680,10 +745,13 @@ func TestRuntimeInvokeRootSendsHostInvokeRootWithProfile(t *testing.T) {
 	in.Flush()
 	consumed := 0
 	_ = readNextLine(t, out, &consumed) // runtime.ready
+	dependency, err := p.Dependencies.Require(testTargetAlias)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	go func() {
-		resCh <- p.InvokeRoot(
-			"com.target",
+		resCh <- dependency.InvokeRoot(
 			"run",
 			map[string]any{"text": "hi"},
 			&result,
@@ -695,8 +763,11 @@ func TestRuntimeInvokeRootSendsHostInvokeRootWithProfile(t *testing.T) {
 	if req["type"] != "host.invokeRoot" {
 		t.Fatalf("expected host.invokeRoot, got %v", req["type"])
 	}
-	if req["brickId"] != "com.target" || req["commandId"] != "run" {
+	if !reflect.DeepEqual(req["ref"], testTargetRefPayload()) || req["commandId"] != "run" {
 		t.Fatalf("unexpected invoke target: %+v", req)
+	}
+	if req["dependencyAlias"] != testTargetAlias {
+		t.Fatalf("missing dependency alias: %+v", req)
 	}
 	if req["profileId"] != "work" {
 		t.Fatalf("expected profileId=work, got %v", req["profileId"])
@@ -725,8 +796,9 @@ func TestRuntimeInvokeRootSendsHostInvokeRootWithProfile(t *testing.T) {
 
 func TestRuntimeInvokeStreamOutsideCommandRequiresParent(t *testing.T) {
 	p, in, out := newTestRuntime(t, nil)
+	dependency := testDependency(t, p)
 
-	events, errs := p.InvokeStream("com.target", "run", map[string]any{"text": "hi"}, WithProfileID("work"))
+	events, errs := dependency.InvokeStream("run", map[string]any{"text": "hi"}, WithProfileID("work"))
 
 	consumed := 0
 	if leaked, ok := readLineWithin(t, out, &consumed, 100*time.Millisecond); ok {
@@ -762,7 +834,11 @@ func TestRuntimeInvokeStreamOutsideCommandRequiresParent(t *testing.T) {
 func TestCommandContextInvokeStreamReceivesChunksAndResult(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("stream-proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			events, errs := ctx.InvokeStream("com.target", "run", map[string]any{"text": "hi"})
+			dependency, err := ctx.Dependencies().Require(testTargetAlias)
+			if err != nil {
+				return nil, err
+			}
+			events, errs := dependency.InvokeStream("run", map[string]any{"text": "hi"})
 			got := []InvokeStreamEvent{}
 			for event := range events {
 				got = append(got, event)
@@ -778,7 +854,7 @@ func TestCommandContextInvokeStreamReceivesChunksAndResult(t *testing.T) {
 	writeLine(t, in, map[string]any{
 		"type": "command.invoke", "id": "cmd-stream-1", "commandId": "stream-proxy", "input": nil,
 		"invocation": map[string]any{
-			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "work"},
+			"source": "hotkey", "dependencyProfiles": map[string]any{BrickKeyOf(testTargetRef): "work"},
 		},
 	})
 	in.Flush()
@@ -832,12 +908,16 @@ func TestCommandContextInvokeStreamReceivesChunksAndResult(t *testing.T) {
 func TestCommandContextInvoke(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			dependency, err := ctx.Dependencies().Require(testTargetAlias)
+			if err != nil {
+				return nil, err
+			}
 			var automatic map[string]any
-			if err := ctx.Invoke("com.target", "automatic", nil, &automatic); err != nil {
+			if err := dependency.Invoke("automatic", nil, &automatic); err != nil {
 				return nil, err
 			}
 			var manual map[string]any
-			if err := ctx.Invoke("com.target", "manual", nil, &manual, WithProfileID("manual-work")); err != nil {
+			if err := dependency.Invoke("manual", nil, &manual, WithProfileID("manual-work")); err != nil {
 				return nil, err
 			}
 			return map[string]any{"automatic": automatic, "manual": manual}, nil
@@ -848,7 +928,7 @@ func TestCommandContextInvoke(t *testing.T) {
 	writeLine(t, in, map[string]any{
 		"type": "command.invoke", "id": "cmd-1", "commandId": "proxy", "input": nil,
 		"invocation": map[string]any{
-			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "dep-work"},
+			"source": "hotkey", "dependencyProfiles": map[string]any{BrickKeyOf(testTargetRef): "dep-work"},
 		},
 	})
 	in.Flush()
@@ -905,7 +985,7 @@ func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
 		"type": "command.invoke", "id": "cmd-invocation-1", "commandId": "inspect", "input": nil,
 		"invocation": map[string]any{
 			"source": "hotkey", "triggerId": "open", "hotkeyId": "brick:open", "profileId": "work",
-			"dependencyProfiles": map[string]any{"com.target": "dep-work"},
+			"dependencyProfiles": map[string]any{BrickKeyOf(testTargetRef): "dep-work"},
 			"binding":            map[string]any{"kind": "accelerator", "accelerator": "Alt+O"},
 		},
 	})
@@ -918,7 +998,7 @@ func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
 	if invocation["source"] != "hotkey" || invocation["triggerId"] != "open" || invocation["profileId"] != "work" {
 		t.Fatalf("unexpected invocation context: %+v", invocation)
 	}
-	if invocation["dependencyProfiles"].(map[string]any)["com.target"] != "dep-work" {
+	if invocation["dependencyProfiles"].(map[string]any)[BrickKeyOf(testTargetRef)] != "dep-work" {
 		t.Fatalf("unexpected dependency profiles: %+v", invocation)
 	}
 
@@ -937,8 +1017,12 @@ func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
 func TestCommandContextInvokeRootPropagatesAuditParent(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("root-proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
+			dependency, err := ctx.Dependencies().Require(testTargetAlias)
+			if err != nil {
+				return nil, err
+			}
 			var result map[string]any
-			if err := ctx.InvokeRoot("com.target", "run", nil, &result); err != nil {
+			if err := dependency.InvokeRoot("run", nil, &result); err != nil {
 				return nil, err
 			}
 			return result, nil
@@ -949,7 +1033,7 @@ func TestCommandContextInvokeRootPropagatesAuditParent(t *testing.T) {
 	writeLine(t, in, map[string]any{
 		"type": "command.invoke", "id": "cmd-root-1", "commandId": "root-proxy", "input": nil,
 		"invocation": map[string]any{
-			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "dep-work"},
+			"source": "hotkey", "dependencyProfiles": map[string]any{BrickKeyOf(testTargetRef): "dep-work"},
 		},
 	})
 	in.Flush()
@@ -1450,12 +1534,17 @@ func TestRuntimeOpenSession(t *testing.T) {
 	_ = readNextLine(t, out, &consumed) // runtime.ready
 
 	go func() {
-		session, err := p.OpenSession("com.target", WithSessionProfileID("work"))
+		dependency, err := p.Dependencies.Require(testTargetAlias)
 		if err != nil {
 			resCh <- err
 			return
 		}
-		if session.ID != "s1" || session.BrickID != "com.target" || session.ProfileID != "work" {
+		session, err := dependency.OpenSession(WithSessionProfileID("work"))
+		if err != nil {
+			resCh <- err
+			return
+		}
+		if session.ID != "s1" || session.Ref != testTargetRef || session.ProfileID != "work" {
 			resCh <- fmt.Errorf("unexpected session: %+v", session)
 			return
 		}
@@ -1469,9 +1558,12 @@ func TestRuntimeOpenSession(t *testing.T) {
 	if openReq["profileId"] != "work" {
 		t.Fatalf("expected profileId=work, got %v", openReq["profileId"])
 	}
+	if openReq["dependencyAlias"] != testTargetAlias {
+		t.Fatalf("missing dependency alias: %+v", openReq)
+	}
 	writeLine(t, in, map[string]any{
 		"type": "host.result", "id": openReq["id"], "result": map[string]any{
-			"sessionId": "s1", "brickId": "com.target", "profileId": "work",
+			"sessionId": "s1", "ref": testTargetRef, "profileId": "work",
 		},
 	})
 	in.Flush()
@@ -1503,7 +1595,12 @@ func TestRuntimeOpenSessionInvokeStreamOutsideCommandRequiresParent(t *testing.T
 	_ = readNextLine(t, out, &consumed) // runtime.ready
 
 	go func() {
-		session, err := p.OpenSession("com.target", WithSessionProfileID("work"))
+		dependency, err := p.Dependencies.Require(testTargetAlias)
+		if err != nil {
+			resCh <- err
+			return
+		}
+		session, err := dependency.OpenSession(WithSessionProfileID("work"))
 		if err != nil {
 			resCh <- err
 			return
@@ -1526,7 +1623,7 @@ func TestRuntimeOpenSessionInvokeStreamOutsideCommandRequiresParent(t *testing.T
 	}
 	writeLine(t, in, map[string]any{
 		"type": "host.result", "id": openReq["id"], "result": map[string]any{
-			"sessionId": "s1", "brickId": "com.target", "profileId": "work",
+			"sessionId": "s1", "ref": testTargetRef, "profileId": "work",
 		},
 	})
 	in.Flush()
@@ -1551,7 +1648,11 @@ func TestRuntimeOpenSessionInvokeStreamOutsideCommandRequiresParent(t *testing.T
 func TestCommandContextOpenSession(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			session, err := ctx.OpenSession("com.target")
+			dependency, err := ctx.Dependencies().Require(testTargetAlias)
+			if err != nil {
+				return nil, err
+			}
+			session, err := dependency.OpenSession()
 			if err != nil {
 				return nil, err
 			}
@@ -1567,7 +1668,7 @@ func TestCommandContextOpenSession(t *testing.T) {
 	writeLine(t, in, map[string]any{
 		"type": "command.invoke", "id": "cmd-1", "commandId": "proxy", "input": nil,
 		"invocation": map[string]any{
-			"source": "hotkey", "dependencyProfiles": map[string]any{"com.target": "work"},
+			"source": "hotkey", "dependencyProfiles": map[string]any{BrickKeyOf(testTargetRef): "work"},
 		},
 	})
 	in.Flush()
@@ -1579,7 +1680,7 @@ func TestCommandContextOpenSession(t *testing.T) {
 		t.Fatalf("unexpected session open: %+v", openReq)
 	}
 	writeLine(t, in, map[string]any{
-		"type": "host.result", "id": openReq["id"], "result": map[string]any{"sessionId": "s1", "brickId": "com.target"},
+		"type": "host.result", "id": openReq["id"], "result": map[string]any{"sessionId": "s1", "ref": testTargetRef},
 	})
 	in.Flush()
 
@@ -1608,7 +1709,11 @@ func TestCommandContextOpenSession(t *testing.T) {
 func TestCommandContextSessionInvokeStreamReceivesChunksAndResult(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("session-stream-proxy", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			session, err := ctx.OpenSession("com.target", WithSessionProfileID("work"))
+			dependency, err := ctx.Dependencies().Require(testTargetAlias)
+			if err != nil {
+				return nil, err
+			}
+			session, err := dependency.OpenSession(WithSessionProfileID("work"))
 			if err != nil {
 				return nil, err
 			}
@@ -1637,7 +1742,7 @@ func TestCommandContextSessionInvokeStreamReceivesChunksAndResult(t *testing.T) 
 		t.Fatalf("unexpected session open: %+v", openReq)
 	}
 	writeLine(t, in, map[string]any{
-		"type": "host.result", "id": openReq["id"], "result": map[string]any{"sessionId": "s1", "brickId": "com.target"},
+		"type": "host.result", "id": openReq["id"], "result": map[string]any{"sessionId": "s1", "ref": testTargetRef},
 	})
 	in.Flush()
 
@@ -2165,7 +2270,15 @@ func TestTracePropagationWithoutTrace(t *testing.T) {
 func TestTracePropagationInvoke(t *testing.T) {
 	p, in, out := newTestRuntime(t, func(p *Runtime) {
 		p.OnCommand("caller", func(ctx *CommandContext, _ json.RawMessage) (any, error) {
-			err := ctx.Invoke("com.test.target", "echo", map[string]any{"x": 1}, nil)
+			dependency, err := ctx.Dependencies().Require(testTargetAlias)
+			if err != nil {
+				return nil, err
+			}
+			err = dependency.Invoke(
+				"echo",
+				map[string]any{"x": 1},
+				nil,
+			)
 			return map[string]any{"ok": true}, err
 		})
 	})

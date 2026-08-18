@@ -16,27 +16,34 @@ func WithSessionProfileID(profileID string) SessionOption {
 	}
 }
 
-// BrickSession 表示一个跨 Brick 会话。Close 前，宿主会保持目标 Brick 实例不被回收。
-type BrickSession struct {
-	runtime         *Runtime
-	ID              string
-	BrickID         string
-	ProfileID       string
-	parentRequestID string
-	trace           *TraceContext
-}
-
-// OpenSession 打开跨 Brick 会话。宿主会在会话期间保留目标 Brick 实例状态。
-func (p *Runtime) OpenSession(brickID string, opts ...SessionOption) (*BrickSession, error) {
+func collectSessionOptions(opts []SessionOption) sessionOptions {
 	options := sessionOptions{}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&options)
 		}
 	}
+	return options
+}
+
+// BrickSession 表示一个跨 Brick 会话。Close 前，宿主会保持目标 Brick 实例不被回收。
+type BrickSession struct {
+	runtime         *Runtime
+	ID              string
+	Ref             BrickRef
+	ProfileID       string
+	parentRequestID string
+	trace           *TraceContext
+}
+
+func (p *Runtime) openDependencySession(dependencyAlias string, ref BrickRef, options sessionOptions) (*BrickSession, error) {
+	if err := validateBrickRef(ref); err != nil {
+		return nil, err
+	}
 	msg := map[string]any{
-		"type":    "host.session.open",
-		"brickId": brickID,
+		"type":            "host.session.open",
+		"dependencyAlias": dependencyAlias,
+		"ref":             ref,
 	}
 	if options.profileID != "" {
 		msg["profileId"] = options.profileID
@@ -45,20 +52,23 @@ func (p *Runtime) OpenSession(brickID string, opts ...SessionOption) (*BrickSess
 		msg["trace"] = tm
 	}
 	var result struct {
-		SessionID string `json:"sessionId"`
-		BrickID   string `json:"brickId"`
-		ProfileID string `json:"profileId"`
+		SessionID string   `json:"sessionId"`
+		Ref       BrickRef `json:"ref"`
+		ProfileID string   `json:"profileId"`
 	}
 	if err := p.transport.hostCall(msg, &result); err != nil {
 		return nil, err
 	}
-	if result.BrickID == "" {
-		result.BrickID = brickID
+	if err := validateBrickRef(result.Ref); err != nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "host.session.open result is missing a valid ref")
+	}
+	if result.Ref != ref {
+		return nil, NewBppError("PROTOCOL_ERROR", "host.session.open returned a ref that does not match the dependency binding")
 	}
 	return &BrickSession{
 		runtime:         p,
 		ID:              result.SessionID,
-		BrickID:         result.BrickID,
+		Ref:             result.Ref,
 		ProfileID:       result.ProfileID,
 		parentRequestID: options.parentRequestID,
 		trace:           options.trace,

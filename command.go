@@ -162,70 +162,12 @@ func (c *CommandContext) Error(message string, err error, fields map[string]any)
 	c.runtime.transport.sendLog("error", message, fields, errPayload, c.Trace)
 }
 
-func (c *CommandContext) applyInvokeContext(brickID string, options *invokeOptions) {
-	if options.profileID == "" {
-		options.profileID = c.Invocation.DependencyProfiles[brickID]
+// Dependencies 返回绑定当前 command parent、trace 与 Profile 的依赖注册表。
+func (c *CommandContext) Dependencies() *ScopedDependencyRegistry {
+	return &ScopedDependencyRegistry{
+		registry:           c.runtime.Dependencies,
+		parentRequestID:    c.RequestID,
+		trace:              c.Trace,
+		dependencyProfiles: c.Invocation.DependencyProfiles,
 	}
-	options.parentRequestID = c.RequestID
-	options.trace = c.Trace
-}
-
-// Invoke 跨 Brick 调用命令。宿主会自动管理目标 Brick 实例生命周期。
-func (c *CommandContext) Invoke(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
-	if !c.runtime.isCommandActive(c.RequestID) {
-		return parentInvocationRequired("Invoke must run inside an active command handler")
-	}
-	opts = append(opts, func(options *invokeOptions) {
-		c.applyInvokeContext(brickID, options)
-	})
-	return c.runtime.Invoke(brickID, commandID, input, into, opts...)
-}
-
-// InvokeResource 跨 Brick 调用并始终返回 ResourceHandle。
-func (c *CommandContext) InvokeResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
-	if !c.runtime.isCommandActive(c.RequestID) {
-		return nil, parentInvocationRequired("InvokeResource must run inside an active command handler")
-	}
-	opts = append(opts, func(options *invokeOptions) { c.applyInvokeContext(brickID, options) })
-	return c.runtime.InvokeResource(brickID, commandID, input, opts...)
-}
-
-// InvokeRootResource 发起带审计父请求的资源调用。
-func (c *CommandContext) InvokeRootResource(brickID, commandID string, input any, opts ...InvokeOption) (*ResourceHandle, error) {
-	options := collectInvokeOptions(opts)
-	c.applyInvokeContext(brickID, &options)
-	return c.runtime.invokeResourceWithType("host.invokeRoot", brickID, commandID, input, options)
-}
-
-// InvokeRoot 发起独立 root 调用，并携带当前 command request id 供宿主审计。
-func (c *CommandContext) InvokeRoot(brickID, commandID string, input any, into any, opts ...InvokeOption) error {
-	options := collectInvokeOptions(opts)
-	c.applyInvokeContext(brickID, &options)
-	return c.runtime.invokeWithType("host.invokeRoot", brickID, commandID, input, into, options)
-}
-
-// InvokeStream 跨 Brick 流式调用命令。
-func (c *CommandContext) InvokeStream(brickID, commandID string, input any, opts ...InvokeOption) (<-chan InvokeStreamEvent, <-chan error) {
-	if !c.runtime.isCommandActive(c.RequestID) {
-		return failedInvokeStream(parentInvocationRequired("InvokeStream must run inside an active command handler"))
-	}
-	opts = append(opts, func(options *invokeOptions) {
-		c.applyInvokeContext(brickID, options)
-	})
-	return c.runtime.InvokeStream(brickID, commandID, input, opts...)
-}
-
-// OpenSession 打开跨 Brick 会话。Close 前，宿主会保持目标 Brick 实例不被回收。
-func (c *CommandContext) OpenSession(brickID string, opts ...SessionOption) (*BrickSession, error) {
-	if !c.runtime.isCommandActive(c.RequestID) {
-		return nil, parentInvocationRequired("OpenSession must run inside an active command handler")
-	}
-	opts = append(opts, func(options *sessionOptions) {
-		if options.profileID == "" {
-			options.profileID = c.Invocation.DependencyProfiles[brickID]
-		}
-		options.parentRequestID = c.RequestID
-		options.trace = c.Trace
-	})
-	return c.runtime.OpenSession(brickID, opts...)
 }

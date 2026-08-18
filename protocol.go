@@ -3,11 +3,36 @@ package brickly
 import "encoding/json"
 
 // SdkVersion 是 Go SDK 发布版本（与 Node/Python 包版本对齐）。
-const SdkVersion = "0.3.1"
+const SdkVersion = "0.5.0"
 
 // ProtocolVersion 是当前 SDK 实现的 BPP 协议版本。
 // 保持与 packages/brickly-sdk-node/src/protocol.ts 一致。
-const ProtocolVersion = "0.2.0"
+const ProtocolVersion = "0.4.0"
+
+// BrickOrigin 标识 Brick 制品来源。
+type BrickOrigin string
+
+const (
+	BrickOriginInstalled   BrickOrigin = "installed"
+	BrickOriginDevelopment BrickOrigin = "development"
+	BrickOriginReview      BrickOrigin = "review"
+)
+
+// BrickRef 是跨来源、跨版本调用的完整目标身份。
+type BrickRef struct {
+	BrickID string      `json:"brickId"`
+	Origin  BrickOrigin `json:"origin"`
+	Version string      `json:"version"`
+}
+
+// BrickDependencyBindings 是 host.hello 下发的 alias 到精确目标身份映射。
+type BrickDependencyBindings map[string]BrickRef
+
+// BrickKeyOf 返回与 Host 一致的 BrickKey 标量编码。
+func BrickKeyOf(ref BrickRef) string {
+	encoded, _ := json.Marshal([]string{string(ref.Origin), ref.BrickID, ref.Version})
+	return string(encoded)
+}
 
 // TraceContext 携带跨进程追踪上下文，由宿主在 command.invoke 中下发，
 // SDK 在所有 host.* 调用中自动合并，实现父子 Trace 关联。
