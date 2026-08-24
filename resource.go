@@ -2,18 +2,21 @@ package brickly
 
 import (
 	"bytes"
-	"encoding/base64"
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"reflect"
 	"strings"
 	"sync"
+
+	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
 )
 
 const MaxResourceMaterializationBytes int64 = 200 * 1024 * 1024
 const maxResourceValueDepth = 64
-const resourceUploadChunkBytes = 1024 * 1024
 
 // ResourceRef 是宿主资源的短期能力引用。accessToken 只用于协议传输，ToJSON 会脱敏。
 type ResourceRef struct {
@@ -34,318 +37,129 @@ type ResourceCreateOptions struct {
 	ExpectedSizeBytes int64
 }
 
-// OpenResource 校验并绑定已有 ResourceRef。该操作是惰性的，不会打开宿主资源流。
+// OpenResource 校验并绑定已有 ResourceRef。该操作是惰性的，不会立即读取宿主资源。
 func (p *Runtime) OpenResource(ref ResourceRef) (*ResourceHandle, error) {
-	if p == nil || p.transport == nil {
-		return nil, NewBppError("INTERNAL_ERROR", "resource transport is unavailable")
+	if p == nil {
+		return nil, NewBppError("INTERNAL_ERROR", "runtime is unavailable")
 	}
 	if !validTypedResourceRef(ref) {
 		return nil, NewBppError("INVALID_RESOURCE_REF", "ResourceRef 格式无效")
 	}
-	return newResourceHandle(p.transport, ref), nil
+	return &ResourceHandle{grpc: p.grpcResources, Ref: ref}, nil
 }
 
 func (p *Runtime) CreateResource(content any, options *ResourceCreateOptions) (*ResourceHandle, error) {
 	return p.createResource(content, options, "")
 }
 
-func (p *Runtime) createResource(content any, options *ResourceCreateOptions, parentRequestID string) (*ResourceHandle, error) {
+func (p *Runtime) createResource(content any, options *ResourceCreateOptions, _ string) (*ResourceHandle, error) {
 	defaultMime := ""
-	var sizeBytes int
-	switch value := content.(type) {
+	switch content.(type) {
 	case string:
 		defaultMime = "text/plain; charset=utf-8"
-		sizeBytes = len(value)
 	case []byte:
 		defaultMime = "application/octet-stream"
-		sizeBytes = len(value)
 	default:
 		return nil, NewBppError("INVALID_INPUT", "资源内容必须是 string 或 []byte。")
 	}
-	if sizeBytes > resourceUploadChunkBytes {
-		writerOptions := ResourceCreateOptions{MimeType: defaultMime, ExpectedSizeBytes: int64(sizeBytes)}
-		if options != nil {
-			writerOptions = *options
-			writerOptions.ExpectedSizeBytes = int64(sizeBytes)
-			if writerOptions.MimeType == "" {
-				writerOptions.MimeType = defaultMime
-			}
-		}
-		writer, err := p.createResourceWriter(&writerOptions, parentRequestID)
-		if err != nil {
-			return nil, err
-		}
-		defer writer.Abort()
+	if p.grpcResources != nil {
+		var data []byte
 		switch value := content.(type) {
 		case string:
-			_, err = writer.WriteString(value)
+			data = []byte(value)
 		case []byte:
-			_, err = writer.Write(value)
+			data = value
 		}
+		name, mediaType := "", defaultMime
+		var ttlMs int64
+		if options != nil {
+			if options.Name != "" {
+				name = options.Name
+			}
+			if options.MimeType != "" {
+				mediaType = options.MimeType
+			}
+			ttlMs = options.TTLMillis
+		}
+		_ = ttlMs
+		proto, err := p.grpcResources.Create(context.Background(), data, name, mediaType)
 		if err != nil {
 			return nil, err
 		}
-		return writer.Finish()
+		return newGrpcResourceHandle(p.grpcResources, protoToSDKResourceRef(proto)), nil
 	}
-	var encoded map[string]any
-	switch value := content.(type) {
-	case string:
-		encoded = map[string]any{"encoding": "utf8", "data": value}
-	case []byte:
-		encoded = map[string]any{"encoding": "base64", "data": base64.StdEncoding.EncodeToString(value)}
-	}
-	metadata := map[string]any{"mimeType": defaultMime}
-	if options != nil {
-		if options.MimeType != "" {
-			metadata["mimeType"] = options.MimeType
-		}
-		if options.Name != "" {
-			metadata["name"] = options.Name
-		}
-		if options.TTLMillis != 0 {
-			metadata["ttlMs"] = options.TTLMillis
-		}
-	}
-	ref, err := p.transport.resourceCreate(encoded, metadata)
-	if err != nil {
-		return nil, err
-	}
-	if ref.Kind != "brickly.resource" || ref.ResourceID == "" || ref.AccessToken == "" || ref.SHA256 == "" {
-		return nil, NewBppError("PROTOCOL_ERROR", "host.resource.create returned invalid ResourceRef")
-	}
-	return newResourceHandle(p.transport, ref), nil
+	return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
 func (p *Runtime) CreateResourceFrom(reader io.Reader, options *ResourceCreateOptions) (handle *ResourceHandle, err error) {
 	return p.createResourceFrom(reader, options, "")
 }
 
-func (p *Runtime) createResourceFrom(reader io.Reader, options *ResourceCreateOptions, parentRequestID string) (handle *ResourceHandle, err error) {
+func (p *Runtime) createResourceFrom(reader io.Reader, options *ResourceCreateOptions, _ string) (*ResourceHandle, error) {
 	if reader == nil {
 		return nil, NewBppError("INVALID_INPUT", "资源流 reader 不能为空。")
 	}
 	if options != nil && options.ExpectedSizeBytes < 0 {
 		return nil, NewBppError("INVALID_INPUT", "ExpectedSizeBytes 必须是非负整数。")
 	}
-	writer, err := p.createResourceWriter(options, parentRequestID)
+	limited := io.LimitReader(reader, MaxResourceMaterializationBytes+1)
+	data, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, err
 	}
-	defer writer.Abort()
-	if _, err = writer.ReadFrom(reader); err != nil {
-		return nil, err
+	if int64(len(data)) > MaxResourceMaterializationBytes {
+		return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源超过 200 MiB，不能整体读取。请使用流读取。")
 	}
-	return writer.Finish()
+	return p.createResource(data, options, "")
 }
 
-// CreateResourceWriter 创建 store-and-forward 资源写入器；调用方无需管理 wire 分块。
+// CreateResourceWriter 创建资源写入器。当前 Host 只支持一次性 Create，Writer 尚未接通。
 func (p *Runtime) CreateResourceWriter(options *ResourceCreateOptions) (*ResourceWriter, error) {
 	return p.createResourceWriter(options, "")
 }
 
-func (p *Runtime) createResourceWriter(options *ResourceCreateOptions, parentRequestID string) (*ResourceWriter, error) {
-	if options != nil && options.ExpectedSizeBytes < 0 {
-		return nil, NewBppError("INVALID_INPUT", "ExpectedSizeBytes 必须是非负整数。")
-	}
-	metadata := map[string]any{"mimeType": "application/octet-stream"}
-	var expectedSizeBytes int64
-	if options != nil {
-		if options.MimeType != "" {
-			metadata["mimeType"] = options.MimeType
-		}
-		if options.Name != "" {
-			metadata["name"] = options.Name
-		}
-		if options.TTLMillis != 0 {
-			metadata["ttlMs"] = options.TTLMillis
-		}
-		expectedSizeBytes = options.ExpectedSizeBytes
-	}
-	uploadID, err := p.transport.resourceUploadStart(metadata, expectedSizeBytes, parentRequestID)
-	if err != nil {
-		return nil, err
-	}
-	return &ResourceWriter{
-		transport: p.transport,
-		uploadID:  uploadID,
-		buffer:    make([]byte, resourceUploadChunkBytes),
-		state:     "open",
-	}, nil
+func (p *Runtime) createResourceWriter(_ *ResourceCreateOptions, _ string) (*ResourceWriter, error) {
+	return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
-// ResourceWriter 聚合任意大小写入，并按 1 MiB wire 边界顺序上传。
-type ResourceWriter struct {
-	transport *transport
-	uploadID  string
-	buffer    []byte
-	buffered  int
-	offset    int64
-	state     string
-	handle    *ResourceHandle
-	abortSent bool
-	abortErr  error
-	mu        sync.Mutex
+// ResourceWriter 是公开写入面；当前尚未接通 ResourceService。
+type ResourceWriter struct{}
+
+func (w *ResourceWriter) Write([]byte) (int, error) {
+	return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
-func (w *ResourceWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.writeLocked(p)
+func (w *ResourceWriter) WriteString(string) (int, error) {
+	return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
-func (w *ResourceWriter) writeLocked(p []byte) (int, error) {
-	if w.state != "open" {
-		return 0, resourceWriterClosedError()
-	}
-	written := 0
-	for written < len(p) {
-		n := copy(w.buffer[w.buffered:], p[written:])
-		w.buffered += n
-		written += n
-		if w.buffered == len(w.buffer) {
-			if err := w.flushLocked(); err != nil {
-				w.failLocked()
-				return written, err
-			}
-		}
-	}
-	return written, nil
-}
-
-func (w *ResourceWriter) WriteString(value string) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.state != "open" {
-		return 0, resourceWriterClosedError()
-	}
-	written := 0
-	for written < len(value) {
-		n := copy(w.buffer[w.buffered:], value[written:])
-		w.buffered += n
-		written += n
-		if w.buffered == len(w.buffer) {
-			if err := w.flushLocked(); err != nil {
-				w.failLocked()
-				return written, err
-			}
-		}
-	}
-	return written, nil
-}
-
-func (w *ResourceWriter) ReadFrom(reader io.Reader) (int64, error) {
-	if reader == nil {
-		return 0, NewBppError("INVALID_INPUT", "资源流 reader 不能为空。")
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.state != "open" {
-		return 0, resourceWriterClosedError()
-	}
-	buffer := make([]byte, 64*1024)
-	var total int64
-	for {
-		n, readErr := reader.Read(buffer)
-		if n > 0 {
-			written, writeErr := w.writeLocked(buffer[:n])
-			total += int64(written)
-			if writeErr != nil {
-				return total, writeErr
-			}
-			if written != n {
-				return total, io.ErrShortWrite
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				return total, nil
-			}
-			w.failLocked()
-			return total, readErr
-		}
-	}
+func (w *ResourceWriter) ReadFrom(io.Reader) (int64, error) {
+	return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
 func (w *ResourceWriter) Finish() (*ResourceHandle, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.state == "finished" && w.handle != nil {
-		return w.handle, nil
-	}
-	if w.state != "open" {
-		return nil, resourceWriterClosedError()
-	}
-	w.state = "finishing"
-	if err := w.flushLocked(); err != nil {
-		w.failLocked()
-		return nil, err
-	}
-	ref, err := w.transport.resourceUploadFinish(w.uploadID)
-	if err != nil {
-		w.failLocked()
-		return nil, err
-	}
-	if ref.Kind != "brickly.resource" || ref.ResourceID == "" || ref.AccessToken == "" || ref.SHA256 == "" {
-		err = NewBppError("PROTOCOL_ERROR", "host.resource.upload.finish returned invalid ResourceRef")
-		w.failLocked()
-		return nil, err
-	}
-	w.handle = newResourceHandle(w.transport, ref)
-	w.state = "finished"
-	return w.handle, nil
+	return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
 func (w *ResourceWriter) Abort() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.state == "finished" {
-		return nil
-	}
-	w.state = "aborted"
-	w.buffered = 0
-	w.sendAbortLocked()
-	return w.abortErr
-}
-
-func (w *ResourceWriter) flushLocked() error {
-	if w.buffered == 0 {
-		return nil
-	}
-	expected := w.offset + int64(w.buffered)
-	accepted, err := w.transport.resourceUploadWrite(
-		w.uploadID, w.offset, base64.StdEncoding.EncodeToString(w.buffer[:w.buffered]),
-	)
-	if err != nil {
-		return err
-	}
-	if accepted != expected {
-		return NewBppError("PROTOCOL_ERROR", "host.resource.upload.write returned unexpected acceptedBytes")
-	}
-	w.offset = expected
-	w.buffered = 0
 	return nil
-}
-
-func (w *ResourceWriter) failLocked() {
-	w.state = "failed"
-	w.buffered = 0
-	w.sendAbortLocked()
-}
-
-func (w *ResourceWriter) sendAbortLocked() {
-	if w.abortSent {
-		return
-	}
-	w.abortSent = true
-	w.abortErr = w.transport.resourceUploadAbort(w.uploadID)
-}
-
-func resourceWriterClosedError() error {
-	return NewBppError("RESOURCE_UPLOAD_CLOSED", "资源 Writer 已经结束，不能继续写入。")
 }
 
 var _ io.Writer = (*ResourceWriter)(nil)
 var _ io.ReaderFrom = (*ResourceWriter)(nil)
+
+func isBareResourceRef(ref map[string]any) bool {
+	allowed := map[string]bool{
+		"resourceId": true, "sizeBytes": true, "sha256": true, "expiresAt": true,
+		"mimeType": true, "name": true, "kind": true, "accessToken": true,
+	}
+	for key := range ref {
+		if !allowed[key] {
+			return false
+		}
+	}
+	return true
+}
 
 func isResourceRef(value any) bool {
 	ref, ok := value.(map[string]any)
@@ -354,21 +168,16 @@ func isResourceRef(value any) bool {
 	}
 	kind, _ := ref["kind"].(string)
 	resourceID, idOK := ref["resourceId"].(string)
-	token, tokenOK := ref["accessToken"].(string)
-	sha, shaOK := ref["sha256"].(string)
 	size, sizeOK := resourceInt64(ref["sizeBytes"])
-	expiresAt, expiresOK := resourceInt64(ref["expiresAt"])
-	return kind == "brickly.resource" && idOK && resourceID != "" && tokenOK && token != "" &&
-		shaOK && sha != "" && sizeOK && size >= 0 && expiresOK && expiresAt > 0
+	return (kind == "brickly.resource" || kind == "") && idOK && resourceID != "" && sizeOK && size >= 0
 }
 
 func validTypedResourceRef(ref ResourceRef) bool {
 	return ref.Kind == "brickly.resource" &&
 		ref.ResourceID != "" &&
-		ref.AccessToken != "" &&
 		ref.SizeBytes >= 0 &&
 		ref.SHA256 != "" &&
-		ref.ExpiresAt > 0
+		ref.ExpiresAt >= 0
 }
 
 func resourceInt64(value any) (int64, bool) {
@@ -410,7 +219,7 @@ func resourceInt64(value any) (int64, bool) {
 	return 0, false
 }
 
-func hydrateResourceValue(value any, transport *transport, depth int) any {
+func hydrateResourceValue(value any, depth int) any {
 	if depth > maxResourceValueDepth || value == nil {
 		return value
 	}
@@ -421,20 +230,20 @@ func hydrateResourceValue(value any, transport *transport, depth int) any {
 		encoded, _ := json.Marshal(ref)
 		var parsed ResourceRef
 		if json.Unmarshal(encoded, &parsed) == nil {
-			return newResourceHandle(transport, parsed)
+			return newResourceHandle(parsed)
 		}
 	}
 	switch item := value.(type) {
 	case []any:
 		out := make([]any, len(item))
 		for i, child := range item {
-			out[i] = hydrateResourceValue(child, transport, depth+1)
+			out[i] = hydrateResourceValue(child, depth+1)
 		}
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(item))
 		for key, child := range item {
-			out[key] = hydrateResourceValue(child, transport, depth+1)
+			out[key] = hydrateResourceValue(child, depth+1)
 		}
 		return out
 	default:
@@ -579,7 +388,12 @@ func prepareResourceReflectValue(value reflect.Value, depth int) (any, error) {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return value.Int(), nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return value.Uint(), nil
+		// BrickValue 只收安全整数；uint64 原样留下会在编码时报「不支持的类型」。
+		number := value.Uint()
+		if number > math.MaxInt64 {
+			return nil, NewBppError("INVALID_PAYLOAD", "无符号整数超出 BrickValue 可编码范围")
+		}
+		return int64(number), nil
 	case reflect.Float32, reflect.Float64:
 		return value.Float(), nil
 	default:
@@ -610,29 +424,87 @@ func hasJSONOption(options []string, expected string) bool {
 	return false
 }
 
-// ResourceHandle 提供带背压的 io.ReadCloser 资源读取。
+// ResourceHandle 提供 io.ReadCloser 资源读取；有 ResourceService 时一次物化后再按缓冲读。
 type ResourceHandle struct {
-	Ref       ResourceRef
-	transport *transport
-	mu        sync.Mutex
-	active    *resourceStream
-	revoked   bool
-}
-
-type resourceStream struct {
-	handle  *ResourceHandle
+	Ref     ResourceRef
+	grpc    *runtimegrpc.HostResourceClient
 	mu      sync.Mutex
-	readMu  sync.Mutex
-	started bool
-	opening bool
+	body    []byte
+	offset  int
+	loaded  bool
 	closed  bool
-	done    bool
-	stream  string
-	pending []byte
+	revoked bool
 }
 
-func newResourceHandle(transport *transport, ref ResourceRef) *ResourceHandle {
-	return &ResourceHandle{transport: transport, Ref: ref}
+func newResourceHandle(ref ResourceRef) *ResourceHandle {
+	return &ResourceHandle{Ref: ref}
+}
+
+func newGrpcResourceHandle(client *runtimegrpc.HostResourceClient, ref ResourceRef) *ResourceHandle {
+	return &ResourceHandle{grpc: client, Ref: ref}
+}
+
+func hydrateGrpcResourceValue(value any, client *runtimegrpc.HostResourceClient, depth int) any {
+	if depth > maxResourceValueDepth || value == nil || client == nil {
+		return value
+	}
+	if handle, ok := value.(*ResourceHandle); ok {
+		return handle
+	}
+	if ref, ok := value.(map[string]any); ok {
+		resourceID, _ := ref["resourceId"].(string)
+		kind, _ := ref["kind"].(string)
+		if resourceID != "" && (kind == "brickly.resource" || isBareResourceRef(ref)) {
+			size, _ := resourceInt64(ref["sizeBytes"])
+			sha, _ := ref["sha256"].(string)
+			expiresAt, _ := resourceInt64(ref["expiresAt"])
+			mime, _ := ref["mimeType"].(string)
+			name, _ := ref["name"].(string)
+			return newGrpcResourceHandle(client, ResourceRef{
+				Kind:       "brickly.resource",
+				ResourceID: resourceID,
+				SizeBytes:  size,
+				SHA256:     sha,
+				ExpiresAt:  expiresAt,
+				MimeType:   mime,
+				Name:       name,
+			})
+		}
+		out := make(map[string]any, len(ref))
+		for key, child := range ref {
+			out[key] = hydrateGrpcResourceValue(child, client, depth+1)
+		}
+		return out
+	}
+	if items, ok := value.([]any); ok {
+		out := make([]any, len(items))
+		for i, child := range items {
+			out[i] = hydrateGrpcResourceValue(child, client, depth+1)
+		}
+		return out
+	}
+	return value
+}
+
+func protoToSDKResourceRef(ref *runtimegrpc.ResourceRef) ResourceRef {
+	expiresAt := int64(0)
+	if ref.GetExpiresAt() != nil {
+		expiresAt = ref.GetExpiresAt().AsTime().UnixMilli()
+	}
+	converted := ResourceRef{
+		Kind:       "brickly.resource",
+		ResourceID: ref.GetResourceId(),
+		SizeBytes:  int64(ref.GetSizeBytes()),
+		SHA256:     hex.EncodeToString(ref.GetSha256()),
+		ExpiresAt:  expiresAt,
+	}
+	if ref.GetMediaType() != "" {
+		converted.MimeType = ref.GetMediaType()
+	}
+	if ref.GetName() != "" {
+		converted.Name = ref.GetName()
+	}
+	return converted
 }
 
 // MarshalJSON 使 ResourceHandle 作为命令输入/输出时只传递引用。
@@ -651,6 +523,10 @@ func (h *ResourceHandle) ToJSON() map[string]any {
 		value["name"] = h.Ref.Name
 	}
 	return value
+}
+
+func (h *ResourceHandle) Bytes() ([]byte, error) {
+	return h.readAll()
 }
 
 func (h *ResourceHandle) Text() (string, error) {
@@ -677,12 +553,8 @@ func (h *ResourceHandle) SaveTo(path string) error {
 	if path == "" {
 		return NewBppError("INVALID_INPUT", "SaveTo destination 不能为空")
 	}
-	if h.Ref.SizeBytes > MaxResourceMaterializationBytes {
-		// saveTo 仍允许流式保存大资源；这里只保留 nil transport 的快速失败，
-		// 实际资源流不会在此处物化到调用方内存。
-		if h.transport == nil {
-			return NewBppError("PAYLOAD_TOO_LARGE", "资源无法在没有资源传输通道时保存")
-		}
+	if h.grpc == nil {
+		return NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 	}
 	file, err := os.Create(path)
 	if err != nil {
@@ -694,6 +566,9 @@ func (h *ResourceHandle) SaveTo(path string) error {
 }
 
 func (h *ResourceHandle) readAll() ([]byte, error) {
+	if h.grpc != nil {
+		return h.grpc.Read(context.Background(), h.Ref.ResourceID)
+	}
 	if h.Ref.SizeBytes > MaxResourceMaterializationBytes {
 		return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源超过 200 MiB，不能整体读取。请使用流读取。")
 	}
@@ -723,180 +598,57 @@ func (h *ResourceHandle) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.revoked {
-		h.mu.Unlock()
 		return 0, NewBppError("RESOURCE_EXPIRED", "资源已撤销")
 	}
-	s := h.active
-	if s == nil {
-		s = &resourceStream{handle: h}
-		h.active = s
-	}
-	h.mu.Unlock()
-	return s.read(p)
-}
-
-func (s *resourceStream) read(p []byte) (int, error) {
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if h.closed {
 		return 0, io.EOF
 	}
-	if len(s.pending) > 0 {
-		n := copy(p, s.pending)
-		s.pending = s.pending[n:]
-		s.mu.Unlock()
-		return n, nil
+	if err := h.ensureBodyLocked(); err != nil {
+		return 0, err
 	}
-	if s.done {
-		s.mu.Unlock()
-		_ = s.closeStream()
+	if h.offset >= len(h.body) {
 		return 0, io.EOF
 	}
-	if !s.started {
-		s.started, s.opening = true, true
-		s.mu.Unlock()
-		opened, err := s.handle.transport.resourceOpen(s.handle.Ref)
-		s.mu.Lock()
-		s.opening = false
-		if err != nil {
-			s.closed = true
-			s.mu.Unlock()
-			s.handle.release(s)
-			return 0, err
-		}
-		if s.closed {
-			s.mu.Unlock()
-			_ = s.handle.transport.resourceClose(opened.StreamID)
-			s.handle.release(s)
-			return 0, io.EOF
-		}
-		s.stream = opened.StreamID
-		s.mu.Unlock()
-	} else {
-		s.mu.Unlock()
-	}
-
-	for {
-		result, err := s.handle.transport.resourceRead(s.stream)
-		if err != nil {
-			s.mu.Lock()
-			closed := s.closed
-			s.mu.Unlock()
-			if closed {
-				return 0, io.EOF
-			}
-			_ = s.closeStream()
-			return 0, err
-		}
-		chunk, done, err := decodeResourceChunk(result)
-		if err != nil {
-			_ = s.closeStream()
-			return 0, err
-		}
-		s.mu.Lock()
-		if s.closed {
-			s.mu.Unlock()
-			return 0, io.EOF
-		}
-		if done {
-			s.done = true
-		}
-		if len(chunk) > 0 {
-			n := copy(p, chunk)
-			if n < len(chunk) {
-				s.pending = append(s.pending, chunk[n:]...)
-			}
-			s.mu.Unlock()
-			return n, nil
-		}
-		if done {
-			s.mu.Unlock()
-			_ = s.closeStream()
-			return 0, io.EOF
-		}
-		s.mu.Unlock()
-	}
+	n := copy(p, h.body[h.offset:])
+	h.offset += n
+	return n, nil
 }
 
-func (s *resourceStream) closeStream() error {
-	s.mu.Lock()
-	streamID := s.stream
-	s.stream = ""
-	s.closed = true
-	s.mu.Unlock()
-	s.handle.release(s)
-	if streamID == "" {
+func (h *ResourceHandle) ensureBodyLocked() error {
+	if h.loaded {
 		return nil
 	}
-	return s.handle.transport.resourceClose(streamID)
-}
-
-func (h *ResourceHandle) release(s *resourceStream) {
-	h.mu.Lock()
-	if h.active == s {
-		h.active = nil
+	if h.grpc == nil {
+		return NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 	}
-	h.mu.Unlock()
+	data, err := h.grpc.Read(context.Background(), h.Ref.ResourceID)
+	if err != nil {
+		return err
+	}
+	h.body = data
+	h.loaded = true
+	return nil
 }
 
 func (h *ResourceHandle) Close() error {
 	h.mu.Lock()
-	s := h.active
+	h.closed = true
+	h.body = nil
 	h.mu.Unlock()
-	if s == nil {
-		return nil
-	}
-	return s.closeStream()
+	return nil
 }
 
 func (h *ResourceHandle) Revoke() error {
-	h.mu.Lock()
-	if h.revoked {
-		h.mu.Unlock()
-		return nil
-	}
-	h.mu.Unlock()
 	if err := h.Close(); err != nil {
-		return err
-	}
-	if h.transport == nil {
-		return nil
-	}
-	if err := h.transport.resourceRevoke(h.Ref); err != nil {
 		return err
 	}
 	h.mu.Lock()
 	h.revoked = true
 	h.mu.Unlock()
+	if h.grpc == nil {
+		return NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
+	}
 	return nil
-}
-
-func decodeResourceChunk(result resourceReadResult) ([]byte, bool, error) {
-	if result.Chunk == nil || string(result.Chunk) == "null" {
-		return nil, result.Done, nil
-	}
-	var encoded string
-	if json.Unmarshal(result.Chunk, &encoded) == nil {
-		data, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return nil, false, NewBppError("PROTOCOL_ERROR", "资源分块 base64 格式无效")
-		}
-		return data, result.Done, nil
-	}
-	var values []byte
-	if json.Unmarshal(result.Chunk, &values) == nil {
-		return values, result.Done, nil
-	}
-	return nil, false, NewBppError("PROTOCOL_ERROR", "资源分块格式无效")
-}
-
-type resourceReadResult struct {
-	Chunk json.RawMessage `json:"chunk"`
-	Done  bool            `json:"done"`
-}
-type resourceOpenResult struct {
-	StreamID string `json:"streamId"`
 }

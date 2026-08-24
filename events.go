@@ -55,20 +55,16 @@ func (e *EventBus) On(event string, fn EventHandler) func() {
 	}
 }
 
-// Publish 发布事件到事件总线（走 host.event.publish）。
+// Publish 发布事件到事件总线（走 Host EventService）。
 func (e *EventBus) Publish(event string, payload any) error {
 	prepared, err := prepareResourceValue(payload)
 	if err != nil {
 		return err
 	}
-	return e.runtime.transport.hostCall(map[string]any{
-		"type":    "host.event.publish",
-		"event":   event,
-		"payload": prepared,
-	}, nil)
+	return e.runtime.publishEvent(event, prepared)
 }
 
-// dispatch 由 Runtime.handleEventNotify 调用，同步触发所有订阅者。
+// dispatch 由 Runtime.handleEventNotify 调用，异步触发所有订阅者。
 func (e *EventBus) dispatch(event string, payload any, raw map[string]any) {
 	e.mu.RLock()
 	m := e.subs[event]
@@ -94,10 +90,6 @@ func (e *EventBus) dispatch(event string, payload any, raw map[string]any) {
 	if s, ok := raw["publishedAt"].(string); ok {
 		env.PublishedAt = s
 	}
-	// 关键：在 goroutine 中触发回调，避免在 readLoop 同一 goroutine 内
-	// 同步执行用户 handler。否则 handler 里发起 hostCall（如 win.Call）
-	// 会等 host.result，而 host.result 必须由 readLoop 读入——形成自死锁。
-	// 这等价于 Node SDK 中"handler 是 async / await Promise"的非阻塞语义。
 	for _, fn := range fns {
 		go func(f EventHandler) {
 			defer func() { _ = recover() }()

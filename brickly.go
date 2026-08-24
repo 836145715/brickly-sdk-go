@@ -6,23 +6,22 @@
 //	p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
 //	    return map[string]any{"ok": true}, nil
 //	})
-//	p.Start() // 阻塞，直到 stdin 关闭或收到 runtime.shutdown
+//	p.Start() // 阻塞，直到 gRPC Runtime 退出
 //
-// 零外部依赖，只使用 Go 标准库。
-// stdout 仅写 BPP 协议；业务日志必须用 Info/Warn/Error/Debug（runtime.log），禁止无 level 的 stderr 业务输出。
+// 生产路径只走 Host gRPC；业务日志必须用 Info/Warn/Error/Debug。
 package brickly
 
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"context"
+
+	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
 )
 
 // Options 是 New 的可选配置。
@@ -31,22 +30,18 @@ type Options struct {
 	BrickID string
 	// 可选：协议版本。默认 ProtocolVersion。
 	ProtocolVersion string
-	// 可选：stdin / stdout / stderr 流，默认取进程标准流。测试时可注入 pipe。
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
 }
 
 // CommandHandler 是 OnCommand 注册的业务处理函数。
 //
-// 返回 (result, nil) 时 SDK 自动发送 command.result；
-// 返回 (_, err) 时 SDK 自动发送 command.error（*BppError 会保留其 code）。
+// 返回 (result, nil) 时 SDK 通过 gRPC 回传结果；
+// 返回 (_, err) 时 SDK 通过 gRPC 回传错误（*BppError 会保留其 code）。
 type CommandHandler func(ctx *CommandContext, input json.RawMessage) (any, error)
 
-// ReadyHandler 在 SDK 回发 runtime.ready 之后异步触发。
+// ReadyHandler 在 gRPC Runtime 注册成功后异步触发。
 type ReadyHandler func() error
 
-// ShutdownHandler 在收到 runtime.shutdown 时触发；返回后 SDK 自动发 runtime.bye 并退出。
+// ShutdownHandler 在 Runtime 关闭时触发。
 type ShutdownHandler func() error
 
 const maxTerminalWindowEventIDs = 1024
@@ -55,8 +50,6 @@ const maxTerminalWindowEventIDs = 1024
 type Runtime struct {
 	brickID         string
 	protocolVersion string
-
-	transport *transport
 
 	// UI / Events / Platform 与 Node SDK 的 brick.ui / brick.events /
 	// brick.platform 同源。System 是 Platform.System 的便捷别名。
@@ -83,12 +76,15 @@ type Runtime struct {
 	terminalWindowEventIDs map[string]struct{}
 	terminalWindowOrder    []string
 
-	started  atomic.Bool
-	done     chan struct{}
-	doneOnce sync.Once
+	started       atomic.Bool
+	done          chan struct{}
+	doneOnce      sync.Once
+	grpcHandle    *runtimegrpc.RuntimeHandle
+	grpcResources *runtimegrpc.HostResourceClient
+	grpcPlatform  *runtimegrpc.HostPlatformClient
 }
 
-// New 创建并返回一个 Runtime 实例。不会启动 stdin 循环——那是 Start 的职责。
+// New 创建并返回一个 Runtime 实例。不会连接 Host——那是 Start 的职责。
 func New(opts Options) *Runtime {
 	if opts.BrickID == "" {
 		panic("brickly: Options.BrickID is required")
@@ -103,14 +99,6 @@ func New(opts Options) *Runtime {
 		terminalWindowEventIDs: make(map[string]struct{}),
 		done:                   make(chan struct{}),
 	}
-	p.transport = newTransport(transportOptions{
-		brickID:   opts.BrickID,
-		stdin:     firstReader(opts.Stdin, os.Stdin),
-		stdout:    firstWriter(opts.Stdout, os.Stdout),
-		stderr:    firstWriter(opts.Stderr, os.Stderr),
-		onMessage: p.dispatch,
-		onEnd:     p.signalDone,
-	})
 	p.UI = &UI{runtime: p}
 	p.Events = &EventBus{runtime: p}
 	p.Platform = newPlatformAPI(p, nil)
@@ -128,7 +116,7 @@ func (p *Runtime) OnCommand(commandID string, fn CommandHandler) *Runtime {
 	return p
 }
 
-// OnReady 注册 ready 钩子（runtime.ready 回发后异步触发，适合 host-start service 或实例初始化逻辑）。
+// OnReady 注册 ready 钩子（gRPC Runtime 注册成功后异步触发）。
 func (p *Runtime) OnReady(fn ReadyHandler) *Runtime {
 	p.mu.Lock()
 	p.readyHandler = fn
@@ -136,7 +124,7 @@ func (p *Runtime) OnReady(fn ReadyHandler) *Runtime {
 	return p
 }
 
-// OnShutdown 注册 shutdown 钩子；返回后 SDK 自动发 runtime.bye 并退出进程。
+// OnShutdown 注册 shutdown 钩子。
 func (p *Runtime) OnShutdown(fn ShutdownHandler) *Runtime {
 	p.mu.Lock()
 	p.shutdownHandler = fn
@@ -144,77 +132,110 @@ func (p *Runtime) OnShutdown(fn ShutdownHandler) *Runtime {
 	return p
 }
 
-// Start 启动 stdin 循环并阻塞，直到 stdin 关闭或收到 runtime.shutdown。
+// Start 启动 Runtime：必须由 Host 注入 gRPC 环境。
 // 典型用法：main 函数最后一行调用。
 func (p *Runtime) Start() {
 	if !p.started.CompareAndSwap(false, true) {
 		return
 	}
-	p.transport.start()
-	<-p.done
-}
-
-// Debug 发送 debug 级别结构化日志到宿主（runtime.log）。
-func (p *Runtime) Debug(message string, fields map[string]any) {
-	p.transport.sendLog("debug", message, fields, nil, nil)
-}
-
-// Info 发送 info 级别结构化日志到宿主（runtime.log）。
-func (p *Runtime) Info(message string, fields map[string]any) {
-	p.transport.sendLog("info", message, fields, nil, nil)
-}
-
-// Warn 发送 warn 级别结构化日志到宿主（runtime.log）。
-func (p *Runtime) Warn(message string, fields map[string]any) {
-	p.transport.sendLog("warn", message, fields, nil, nil)
-}
-
-// Error 发送 error 级别结构化日志到宿主（runtime.log）。
-func (p *Runtime) Error(message string, err error, fields map[string]any) {
-	var errPayload map[string]any
-	if err != nil {
-		errPayload = map[string]any{"code": "BRICK_ERROR", "message": err.Error()}
-	}
-	p.transport.sendLog("error", message, fields, errPayload, nil)
-}
-
-// BrickID 返回当前 Brick id。
-func (p *Runtime) BrickID() string { return p.brickID }
-
-// —— 内部：消息分发（由 transport 在非 host.*/ping 消息到达时回调） ——
-
-func (p *Runtime) dispatch(msg rawMessage) {
-	switch msg.Type {
-	case "host.hello":
-		p.handleHello(msg)
-	case "command.invoke":
-		p.handleInvoke(msg)
-	case "command.cancel":
-		p.handleCancel(msg)
-	case "event.notify":
-		p.handleEventNotify(msg)
-	case "runtime.shutdown":
-		p.handleShutdown()
-	default:
-		p.Warn("unknown BPP message type", map[string]any{"type": msg.Type})
-	}
-}
-
-func (p *Runtime) handleHello(msg rawMessage) {
-	if err := p.Dependencies.replace(msg.Raw["dependencyBindings"]); err != nil {
-		p.Error("invalid host.hello dependency bindings", err, nil)
+	if os.Getenv(runtimegrpc.HostEndpointEnv) == "" {
+		p.Error("BRICKLY_HOST_ENDPOINT is required; Runtime 只走 Host gRPC", nil, nil)
+		p.started.Store(false)
 		p.signalDone()
 		return
 	}
-	if config, ok := msg.Raw["config"].(map[string]any); ok {
-		p.mu.Lock()
-		p.Config = config
-		p.mu.Unlock()
+	if err := p.startGRPC(); err != nil {
+		p.Error("grpc runtime start failed", err, nil)
+		p.signalDone()
 	}
-	p.transport.send(map[string]any{
-		"type":            "runtime.ready",
-		"protocolVersion": p.protocolVersion,
-	})
+	<-p.done
+	if p.grpcHandle != nil {
+		p.grpcHandle.Close()
+	}
+	if p.grpcResources != nil {
+		_ = p.grpcResources.Close()
+		p.grpcResources = nil
+	}
+	if p.grpcPlatform != nil {
+		_ = p.grpcPlatform.Close()
+		p.grpcPlatform = nil
+	}
+}
+
+func (p *Runtime) startGRPC() error {
+	options, err := runtimegrpc.TakeRuntimeEnv()
+	if err != nil {
+		return err
+	}
+	if client, clientErr := runtimegrpc.NewHostResourceClient(options.HostEndpoint, options.RuntimeToHostToken); clientErr == nil {
+		p.grpcResources = client
+	}
+	if platform, platformErr := runtimegrpc.NewHostPlatformClient(options.HostEndpoint, options.RuntimeToHostToken); platformErr == nil {
+		p.grpcPlatform = platform
+	}
+	p.mu.RLock()
+	commands := make([]string, 0, len(p.commandHandlers))
+	for commandID := range p.commandHandlers {
+		commands = append(commands, commandID)
+	}
+	p.mu.RUnlock()
+	options.Commands = commands
+	options.Invoke = func(commandID string, input *runtimegrpc.BrickValue) (*runtimegrpc.BrickValue, error) {
+		p.mu.RLock()
+		handler, ok := p.commandHandlers[commandID]
+		p.mu.RUnlock()
+		if !ok {
+			if commandID == "echo" {
+				return input, nil
+			}
+			return nil, fmt.Errorf("unknown command: %s", commandID)
+		}
+		raw, convErr := runtimegrpc.BrickValueToJSON(input)
+		if convErr != nil {
+			return nil, convErr
+		}
+		ctx := newCommandContext(p, "grpc-"+commandID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
+		result, invokeErr := handler(ctx, raw)
+		if invokeErr != nil {
+			return nil, invokeErr
+		}
+		prepared, prepErr := prepareResourceValue(result)
+		if prepErr != nil {
+			return nil, prepErr
+		}
+		return runtimegrpc.AnyToBrickValue(prepared)
+	}
+	options.Interact = func(commandID string, session runtimegrpc.InteractSession) (any, error) {
+		p.mu.RLock()
+		handler, ok := p.commandHandlers[commandID]
+		p.mu.RUnlock()
+		if !ok {
+			return nil, fmt.Errorf("unknown command: %s", commandID)
+		}
+		raw, convErr := json.Marshal(session.Initial())
+		if convErr != nil {
+			return nil, convErr
+		}
+		ctx := newCommandContext(p, "grpc-"+commandID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
+		ctx.stream = bindInteractStream(session.Send, session.Events())
+		go func() {
+			select {
+			case <-session.Context().Done():
+				ctx.cancel()
+			case <-ctx.Context().Done():
+			}
+		}()
+		result, interactErr := handler(ctx, raw)
+		if interactErr != nil {
+			return nil, interactErr
+		}
+		return result, nil
+	}
+	handle, err := runtimegrpc.StartRuntime(options)
+	if err != nil {
+		return err
+	}
+	p.grpcHandle = handle
 	p.mu.RLock()
 	fn := p.readyHandler
 	p.mu.RUnlock()
@@ -225,97 +246,70 @@ func (p *Runtime) handleHello(msg rawMessage) {
 					p.Error("onReady panic", fmt.Errorf("%v", r), nil)
 				}
 			}()
-			if err := fn(); err != nil {
-				p.Error("onReady error", err, nil)
+			if readyErr := fn(); readyErr != nil {
+				p.Error("onReady error", readyErr, nil)
 			}
 		}()
 	}
+	return nil
 }
 
-func (p *Runtime) handleInvoke(msg rawMessage) {
-	reqID, _ := msg.Raw["id"].(string)
-	commandID, _ := msg.Raw["commandId"].(string)
-
-	var input json.RawMessage
-	if raw, ok := msg.Raw["input"]; ok {
-		input, _ = json.Marshal(raw)
+func (p *Runtime) platformCall(method string, input any, into any) error {
+	if p.grpcPlatform == nil {
+		return NewBppError("PROTOCOL_ERROR", "PlatformService 未连接；gRPC Runtime 是唯一路径")
 	}
-
-	p.mu.RLock()
-	handler, ok := p.commandHandlers[commandID]
-	p.mu.RUnlock()
-	if !ok {
-		p.transport.send(map[string]any{
-			"type": "command.error",
-			"id":   reqID,
-			"error": map[string]any{
-				"code":    "COMMAND_NOT_FOUND",
-				"message": "Unknown command: " + commandID,
-			},
-		})
-		return
+	result, err := p.grpcPlatform.PlatformCall(context.Background(), method, input)
+	if err != nil {
+		return err
 	}
-
-	ctx := newCommandContext(p, reqID, commandID, extractCommandInvocation(msg), extractTrace(msg))
-	go func() {
-		defer p.finishInvoke(reqID)
-
-		var result any
-		var err error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					err = fmt.Errorf("handler panic: %v", r)
-				}
-			}()
-			result, err = handler(ctx, input)
-		}()
-
-		if err != nil {
-			p.transport.send(map[string]any{
-				"type":  "command.error",
-				"id":    reqID,
-				"error": errorToPayload(err),
-			})
-			return
-		}
-		result, err = prepareResourceValue(result)
-		if err != nil {
-			p.transport.send(map[string]any{
-				"type":  "command.error",
-				"id":    reqID,
-				"error": errorToPayload(err),
-			})
-			return
-		}
-		out := map[string]any{"type": "command.result", "id": reqID}
-		if result != nil {
-			out["result"] = result
-		}
-		p.transport.send(out)
-	}()
+	return runtimegrpc.AssignJSON(result, into)
 }
 
-func (p *Runtime) finishInvoke(reqID string) {
-	p.cancelMu.Lock()
-	if cancel, ok := p.cancelHandlers[reqID]; ok {
-		cancel()
-		delete(p.cancelHandlers, reqID)
+func (p *Runtime) publishEvent(topic string, payload any) error {
+	if p.grpcPlatform == nil {
+		return NewBppError("PROTOCOL_ERROR", "EventService 未连接；gRPC Runtime 是唯一路径")
 	}
-	delete(p.cancelled, reqID)
-	p.cancelMu.Unlock()
+	return p.grpcPlatform.Publish(context.Background(), topic, payload)
 }
 
-func (p *Runtime) handleCancel(msg rawMessage) {
-	reqID, _ := msg.Raw["id"].(string)
-	p.cancelMu.Lock()
-	p.cancelled[reqID] = true
-	cancel := p.cancelHandlers[reqID]
-	p.cancelMu.Unlock()
-	if cancel != nil {
-		cancel()
+func (p *Runtime) connectorInvoke(brickID, commandID string, input any, invocationID string, into any) error {
+	if p.grpcPlatform == nil {
+		return NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
 	}
+	result, err := p.grpcPlatform.Connect(context.Background(), brickID, commandID, input, invocationID)
+	if err != nil {
+		return err
+	}
+	return runtimegrpc.AssignJSON(result, into)
 }
+
+func (p *Runtime) connectorInteract(ctx context.Context, brickID, commandID string, input any, invocationID string) (Interaction, error) {
+	if p.grpcPlatform == nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
+	}
+	return p.grpcPlatform.Interact(ctx, brickID, commandID, input, invocationID)
+}
+
+// Debug 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
+func (p *Runtime) Debug(string, map[string]any) {}
+
+// Info 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
+func (p *Runtime) Info(string, map[string]any) {}
+
+// Warn 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
+func (p *Runtime) Warn(string, map[string]any) {}
+
+// Error 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
+func (p *Runtime) Error(string, error, map[string]any) {}
+
+// eventNotify 是 EventBus 本地投递签名，不是线上协议帧。
+type rawMessage struct {
+	Type string
+	Raw  map[string]any
+}
+
+// BrickID 返回当前 Brick id。
+func (p *Runtime) BrickID() string { return p.brickID }
 
 func (p *Runtime) handleEventNotify(msg rawMessage) {
 	event, _ := msg.Raw["event"].(string)
@@ -343,48 +337,16 @@ func (p *Runtime) handleEventNotify(msg rawMessage) {
 		}
 	}
 
-	p.Events.dispatch(event, unwrapEventResource(payloadRaw, p.transport), msg.Raw)
+	p.Events.dispatch(event, unwrapEventResource(payloadRaw), msg.Raw)
 }
 
-func unwrapEventResource(value any, transport *transport) any {
+func unwrapEventResource(value any) any {
 	if envelope, ok := value.(map[string]any); ok && envelope["encoding"] == "json" {
-		if resource, ok := hydrateResourceValue(envelope["resource"], transport, 0).(*ResourceHandle); ok {
+		if resource, ok := hydrateResourceValue(envelope["resource"], 0).(*ResourceHandle); ok {
 			return resource
 		}
 	}
 	return value
-}
-
-func (p *Runtime) handleShutdown() {
-	// 整个 shutdown 流程必须放到独立 goroutine，避免阻塞 readLoop——
-	// 否则用户在 onShutdown 里调用 win.Close() 等 hostCall 会因 readLoop
-	// 无法读 host.result 而死锁（与 event handler 同源问题）。
-	go p.runShutdown()
-}
-
-func (p *Runtime) runShutdown() {
-	p.clearWindows()
-	p.mu.RLock()
-	fn := p.shutdownHandler
-	p.mu.RUnlock()
-	if fn != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					p.Error("onShutdown panic", fmt.Errorf("%v", r), nil)
-				}
-			}()
-			if err := fn(); err != nil {
-				p.Error("onShutdown error", err, nil)
-			}
-		}()
-	}
-	p.transport.send(map[string]any{"type": "runtime.bye"})
-	p.transport.flush()
-	// 留一点时间让字节流出
-	time.Sleep(50 * time.Millisecond)
-	p.signalDone()
-	os.Exit(0)
 }
 
 func (p *Runtime) signalDone() {
@@ -433,20 +395,6 @@ func (p *Runtime) rememberTerminalWindowEvent(eventID string) bool {
 
 func firstNonEmpty(a, b string) string {
 	if a != "" {
-		return a
-	}
-	return b
-}
-
-func firstReader(a, b io.Reader) io.Reader {
-	if a != nil {
-		return a
-	}
-	return b
-}
-
-func firstWriter(a, b io.Writer) io.Writer {
-	if a != nil {
 		return a
 	}
 	return b

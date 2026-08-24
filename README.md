@@ -1,8 +1,8 @@
 # brickly-sdk-go
 
-Brickly Brick **Go runtime** 官方 SDK。是 [`@syllm/brickly-sdk`](../brickly-sdk-node) (Node) 的 Go 对照实现，API 语义与协议版本完全一致。
+Brickly Brick **Go runtime** 官方 SDK。是 [`@syllm/brickly-sdk`](../brickly-sdk-node) (Node) 的 Go 对照实现，API 语义与 gRPC Runtime 协议版本完全一致。
 
-零外部依赖，只用 Go 标准库（`bufio` / `encoding/json` / `io` / `sync` / `context`）。
+生产传输是 loopback gRPC（`grpc-go`）；缺少 Host endpoint 时拒绝启动。Runtime 服务端放行 Host 30s keepalive（`MinTime=10s`），避免空闲 `interact` 被 `GOAWAY`。
 
 ---
 
@@ -21,7 +21,7 @@ func main() {
     p := brickly.New(brickly.Options{BrickID: "com.example.go-demo"})
 
     p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
-        ctx.Progress(0.5, "thinking...")
+        _ = ctx.Send(map[string]any{"type": "hello"})
         return map[string]any{"ok": true, "echo": string(input)}, nil
     })
 
@@ -39,18 +39,19 @@ func main() {
         return nil
     })
 
-    p.Start() // 阻塞直到 runtime.shutdown 或 stdin 关闭
+    p.Start() // 连接 Host gRPC endpoint，阻塞直到关闭
 }
 ```
 
 SDK 自动完成：
 
-- `host.hello` → `runtime.ready` 握手
-- `runtime.ping` → `runtime.pong` 心跳
-- `host.*` 请求 id 分配与 `host.result` / `host.error` 路由
-- `command.invoke` 分发与 `command.result` / `command.error` 序列化
-- `command.cancel` → `context.Context` 取消信号
-- `runtime.shutdown` → `OnShutdown` 钩子 → `runtime.bye` → 退出
+- 连接 `BRICKLY_HOST_ENDPOINT` 并注册 gRPC Runtime
+- `invoke` / `interact` 命令分发
+- Host 平台 / UI / Resource 客户端路由
+- `context.Context` 取消信号
+- `OnShutdown` 钩子
+
+长期占用使用 `ToolSdk.Start` 与 `ToolHandle.Dispose`/`Stop`。`Close` 是无 force 参数的 `Dispose` 别名。`Owner` context 只等价于 `Dispose`，不会 `Stop`。子窗口默认 attached。
 
 ---
 
@@ -61,8 +62,8 @@ SDK 自动完成：
 | 方法                                               | 作用                                                                       |
 | -------------------------------------------------- | -------------------------------------------------------------------------- |
 | `OnCommand(id, handler)`                           | 注册命令处理器（链式）                                                     |
-| `OnReady(fn)`                                      | runtime.ready 之后异步触发                                                 |
-| `OnShutdown(fn)`                                   | runtime.shutdown 时触发，返回后 SDK 自动发 runtime.bye 退出                |
+| `OnReady(fn)`                                      | gRPC Runtime 就绪后异步触发                                                |
+| `OnShutdown(fn)`                                   | Host 关闭 Runtime 时触发                                                   |
 | `UI.CreateBrowserWindow(url, opts)`                | 创建子窗口，返回 `*WindowHandle`                                           |
 | `UI.ListWindows()`                                 | 列出本 Brick 持有的窗口                                                    |
 | `Events.On(event, fn)`                             | 订阅事件总线（含 `window.*` 系列），返回取消函数                           |
@@ -71,8 +72,8 @@ SDK 自动完成：
 | `Platform.Clipboard.*`                             | 读取或写入系统剪贴板                                                       |
 | `Dependencies.Require(alias)`                      | 获取 Host 握手绑定到精确 `BrickRef` 的依赖客户端                           |
 | `OpenResource(ref)`                                | 惰性绑定已有 `ResourceRef`，不立即访问 Host                                |
-| `Start()`                                          | 启动 stdin 循环（阻塞）                                                    |
-| `Debug/Info/Warn/Error(message, fields)`           | 结构化日志 → `runtime.log`（带 level，推荐）                               |
+| `Start()`                                          | 连接 Host gRPC（阻塞）                                                     |
+| `Debug/Info/Warn/Error(message, fields)`           | 结构化日志入口（当前为本地 no-op，保留 API）                               |
 
 ### `CommandContext`（handler 第一个参数）
 
@@ -80,14 +81,13 @@ SDK 自动完成：
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `RequestID` / `CommandID`                            | 当前请求与命令 id                                                                                                        |
 | `Invocation`                                         | 宿主注入的可信调用来源；未提供时 `Source` 为 `unknown`                                                                   |
-| `Progress(value, message)`                           | 进度（value ∈ [0,1]）                                                                                                    |
-| `Chunk(name, chunk) error`                           | 向具名输出追加流式片段；资源引用无效或 payload 过深时返回错误                                                            |
-| `Output(name, value) error`                          | 一次性覆盖具名输出；资源引用无效或 payload 过深时返回错误                                                                |
+| `Send(event)`                                        | 推给调用方（仅 interact）                                                                                                |
+| `OnEvent(handler)`                                   | 收调用方 send（仅 interact）                                                                                             |
+| `Closed()`                                           | 等到调用方 closeInput / 断开                                                                                             |
 | `Context()`                                          | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
 | `IsCancelled()`                                      | 协作式取消轮询                                                                                                           |
 | `CreateResource(content, options)`                   | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                                |
 | `CreateResourceFrom(reader, options)`                | 从 `io.Reader` 流式创建绑定当前 command 生命周期的资源                                                                   |
-| `CreateResourceWriter(options)`                      | 创建绑定当前 command 生命周期的 store-and-forward writer                                                                 |
 | `Dependencies().Require(alias)`                      | 获取绑定当前 command parent、trace 与 Profile 的依赖客户端                                                               |
 | `UI()` / `Events()`                                  | 与 `Runtime.UI` / `Runtime.Events` 同源                                                                                  |
 | `Platform()` / `System()`                            | 与 `Runtime.Platform` / `Runtime.System` 同源                                                                            |
@@ -97,44 +97,27 @@ SDK 自动完成：
 资源调用返回 `*ResourceHandle`，实现 `io.ReadCloser`，按块读取宿主资源并提供 `Text()`、`JSON(out)`、`SaveTo(path)`、`Revoke()`。资源超过 200 MiB 时不能整体物化，应使用流读取或直接保存到文件；将句柄再次作为输入时 SDK 只传递 `ResourceRef`。
 
 Go command handler 接收 `json.RawMessage`。输入包含资源时，先把对应字段解码为 `ResourceRef`，
-再调用 `runtime.OpenResource(ref)` 获得绑定当前 transport 的可读句柄。Node、Python 和 Renderer
+再调用 `runtime.OpenResource(ref)` 获得惰性可读句柄。Node、Python 和 Renderer
 同样保留业务 JSON 中的 Ref，并通过各自的 `resources.open(ref)` 显式打开。
 
 Brick 可通过 `runtime.CreateResource(content, options)` 主动创建资源；`content` 只接受
 `string` 或 `[]byte`。字符串默认 `text/plain; charset=utf-8`，字节默认
 `application/octet-stream`，通常可传 `nil` options。该能力无需声明 manifest 权限，但仍受 Host
-配额与生命周期治理。小内容走
-一次性快速路径，大内容自动切换到 Writer，调用方式和返回类型不变。
+配额与生命周期治理。`CreateResource` 走 Host `ResourceService.Create`。
 
-大内容使用 `runtime.CreateResourceFrom(reader, options)`。它从 `io.Reader` 自动聚合并按最大 1 MiB
-顺序写入 Host，finish 后返回 `*ResourceHandle`；通常可直接传 `nil` options。finish 前资源
-不可读取，发布后下游读取速度不会影响已经结束的上传。资源总大小不受普通 invoke 的 200 MiB
-上限约束。Host 限制并发上传并在生产环境保留 1 GiB 磁盘安全余量；部署还可配置全局和
-Brick 维度的 pending bytes 配额。
+流式入口使用 `runtime.CreateResourceFrom(reader, options)`：先把 reader 读入内存，再走同一条
+Create 路径，上限 200 MiB。`CreateResourceWriter` 目前尚未接通 ResourceService，会返回未就绪。
 
-需要主动分多次写入时使用 `CreateResourceWriter`。Writer 实现 `io.Writer` 和 `io.ReaderFrom`：
-
-```go
-writer, err := runtime.CreateResourceWriter(options)
-_, err = writer.Write(header)
-_, err = writer.ReadFrom(downloadStream)
-resource, err := writer.Finish()
-```
-
-同一 Writer 的 `Write`、`ReadFrom`、`Finish`、`Abort` 按调用顺序串行执行；`Abort` 不会越过
-已经开始的数据源操作。`WriteString` 直接分段复制到内部缓冲，不会额外创建完整 `[]byte` 副本。
-
-普通 `Invoke` / `InvokeRoot` 始终解码为直接值，逻辑 JSON 输入和结果上限为 200 MiB；
-超限返回 `PAYLOAD_TOO_LARGE`，不会静默改成资源类型。资源结果应从第一次调用起使用
-`InvokeResource`、`InvokeRootResource` 或 `session.InvokeResource`。EventBus 回调统一收到
+普通 `Invoke` / `InvokeRoot` 始终解码为直接值，逻辑 JSON 输入和结果上限为 10 MiB，一次传完；
+超限返回 `PAYLOAD_TOO_LARGE`，不会静默改成资源类型。大结果由作者 `CreateResource`
+后返回 Handle；调用方看到 `ResourceRef`，再 `OpenResource`。EventBus 回调统一收到
 外层 `*ResourceHandle`，先调用 `JSON(&payload)` 取得业务对象。资源内容按普通 JSON
 解析，内嵌 `ResourceRef` 不会自动水合，需要读取时应显式转换。Capability token 不得写入
 日志或持久化，Ref 只能在同一宿主和 TTL 内使用。无论事件大小，回调都不会收到内联对象或
 内部 `{"resource": ..., "encoding": "json"}` 包装；消费完成后应调用 `Close()`。
 
 SDK 在发送 invoke、stream、command 结果、chunk、output 或事件时，会自动把嵌套
-`*ResourceHandle` 转成完整 `ResourceRef`。`OpenResource` 只做校验和 transport 绑定，不会立即访问
-Host：
+`*ResourceHandle` 转成完整 `ResourceRef`。`OpenResource` 只做校验并绑定句柄，不会立即访问 Host：
 
 ```go
 handle, err := runtime.OpenResource(payload.Attachment)
@@ -166,8 +149,7 @@ p.Error("failed", err, nil)
 ctx.Info("search started", map[string]any{"pattern": q})
 ```
 
-对应 BPP `runtime.log`。**不要**使用 `console`/裸 stderr/`Logf`（已删除）。  
-stdout 仅写协议；ready 后仍写裸 stderr 会被宿主记为 `[stderr] …`（error），应改用 `plugin.Info/Warn/Error`。
+业务日志走 `Info` / `Warn` / `Error`，不要写裸 stderr。
 
 ---
 
@@ -185,6 +167,11 @@ err = openAI.Invoke(
     &out,
     brickly.WithProfileID("work"),
 )
+
+session, err := openAI.Interact(ctx.Context(), "complete", map[string]any{"prompt": "写一首诗"})
+if err != nil { return nil, err }
+if err := session.CloseInput(ctx.Context()); err != nil { return nil, err }
+poem, err := session.Result()
 ```
 
 调用方 manifest 必须在 `dependencies` 中声明目标 Brick 和允许调用的命令：
@@ -218,73 +205,55 @@ err = openAI.InvokeRoot(
 
 ### 流式跨 Brick 调用
 
-目标命令会产生 `progress`、`chunk`、`output` 等流式事件时，使用 `InvokeStream`。SDK 会发送 `host.invoke` 且带上 `stream: true`，然后按宿主返回顺序产出事件，最终 `host.result` 会变成 `Type == "result"` 的事件。
+目标命令会推事件时，在 command handler 里 `Interact`，收 `Events()`，再 `Result()`。
 
 ```go
 openAI, err := ctx.Dependencies().Require("openai")
 if err != nil { return nil, err }
-events, errs := openAI.InvokeStream(
-    "chat-completions",
-    map[string]any{"stream": true, "messages": messages},
-    brickly.WithProfileID("work"),
-)
-
-for event := range events {
-    switch event.Type {
-    case "chunk":
-        if event.Name == "text" {
-            fmt.Print(event.Chunk)
-        }
-    case "result":
-        var final map[string]any
-        _ = json.Unmarshal(event.Result, &final)
+session, err := openAI.Interact(ctx.Context(), "chat-completions", map[string]any{
+    "stream": true, "messages": messages,
+})
+if err != nil { return nil, err }
+for event := range session.Events() {
+    if err := ctx.Send(event); err != nil {
+        return nil, err
     }
 }
-if err := <-errs; err != nil {
+if err := session.CloseInput(ctx.Context()); err != nil {
     return nil, err
 }
+return session.Result()
 ```
 
 ## 跨 Brick 会话
 
-当目标 Brick 实例内部有状态时，从依赖客户端打开 session。
+有状态交互就是 `Interact`，不要另做 `Open()`。
 
 ```go
 openAI, err := ctx.Dependencies().Require("openai")
 if err != nil { return nil, err }
-session, err := openAI.OpenSession(brickly.WithSessionProfileID("work"))
-if err != nil {
-    return nil, err
-}
-defer session.Close()
-
-if err := session.Invoke("start-thread", map[string]any{"title": "Draft"}, nil); err != nil {
-    return nil, err
-}
-
-var reply map[string]any
-events, errs := session.InvokeStream("chat", map[string]any{"prompt": "继续刚才的话题"})
-for event := range events {
-    if event.Type == "chunk" {
-        fmt.Print(event.Chunk)
-    }
-    if event.Type == "result" {
-        _ = json.Unmarshal(event.Result, &reply)
+session, err := openAI.Interact(ctx.Context(), "chat", map[string]any{
+    "prompt": "继续刚才的话题",
+})
+if err != nil { return nil, err }
+for event := range session.Events() {
+    if err := ctx.Send(event); err != nil {
+        return nil, err
     }
 }
-if err := <-errs; err != nil {
+if err := session.CloseInput(ctx.Context()); err != nil {
     return nil, err
 }
-return reply, nil
+return session.Result()
 ```
 
-`WithSessionProfileID` 指定的是目标 Brick Profile ID。后续 `session.Invoke` / `session.InvokeStream` 每次都会按调用方 manifest 的 `dependencies[target].commands` 重新校验命令。
+`WithProfileID` 指定的是目标 Brick Profile ID。不传则使用目标 Brick 默认 Profile，或使用热键调用上下文中的依赖 Profile 选择。`Invoke` / `Interact` 都会按调用方 manifest 的 `dependencies[target].commands` 重新校验命令。
 
 ---
 
 ## 平台 System API
 
-`p.Platform.System.*`、`p.System.*` 与 handler 内的 `ctx.Platform().System.*`、`ctx.System().*` 通过 BPP `host.platform.system.*` 调用宿主系统能力：
+`p.Platform.System.*`、`p.System.*` 与 handler 内的 `ctx.Platform().System.*`、`ctx.System().*` 通过 Host `PlatformService` 调用宿主系统能力：
 
 ```go
 p.OnCommand("show-app-info", func(ctx *brickly.CommandContext, _ json.RawMessage) (any, error) {
@@ -319,7 +288,7 @@ p.OnCommand("show-app-info", func(ctx *brickly.CommandContext, _ json.RawMessage
 
 ## 平台 Clipboard API
 
-`p.Platform.Clipboard.*` 与 handler 内的 `ctx.Platform().Clipboard.*` 通过 BPP `host.platform.clipboard.*` 调用宿主剪贴板能力。runtime 侧仍按 manifest 权限校验，调用方需要声明 `os.clipboard`。
+`p.Platform.Clipboard.*` 与 handler 内的 `ctx.Platform().Clipboard.*` 通过 Host `PlatformService` 调用宿主剪贴板能力。runtime 侧仍按 manifest 权限校验，调用方需要声明 `os.clipboard`。
 
 ```go
 snapshot, err := ctx.Platform().Clipboard.ReadContent()
@@ -416,7 +385,7 @@ termination, err := win.ForceClose()
 termination, err = win.Destroy() // 旧便利名，等价于 ForceClose
 ```
 
-终态后 `IsClosed()` 返回 true，Runtime Map 和该句柄的全部 handler 会被清空。并发 `Close()` 共享在途请求；重复 `window.closed.eventId` 有界去重；transport 结束执行同样的本地释放。
+终态后 `IsClosed()` 返回 true，Runtime Map 和该句柄的全部 handler 会被清空。并发 `Close()` 共享在途请求；重复 `window.closed.eventId` 有界去重；Runtime 结束时执行同样的本地释放。
 
 ### 3. 状态查询（23，全部 `(bool, error)`）
 
@@ -510,7 +479,7 @@ wc.Copy()  wc.Paste()  wc.Cut()  wc.SelectAll()  wc.Undo()  wc.Redo()
 ### 通用兜底：`win.Call`
 
 ```go
-// 当宿主开放了新方法、但 SDK 还没升级时，可直接走 host.ui.window.call：
+// 当宿主开放了新方法、但 SDK 还没升级时，可直接走 ui.window.call：
 var url string
 err := win.Call("webContents.getURL", nil, &url)
 ```
@@ -538,7 +507,9 @@ p.OnCommand("long-task", func(ctx *brickly.CommandContext, _ json.RawMessage) (a
             return nil, brickly.NewBppError("CANCELLED", "user cancelled")
         default:
         }
-        ctx.Progress(float64(i+1)/100, "")
+        if err := ctx.Send(map[string]any{"progress": float64(i + 1) / 100}); err != nil {
+            return nil, err
+        }
         time.Sleep(50 * time.Millisecond)
     }
     return map[string]any{"done": true}, nil
@@ -553,7 +524,7 @@ p.OnCommand("long-task", func(ctx *brickly.CommandContext, _ json.RawMessage) (a
 return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 ```
 
-`BppError.Code` 取值以 `specs/bpp.schema.json` 的 `BridgeErrorCode` 为准，常见值包括：
+`BppError.Code` 取值以宿主统一错误码为准，常见值包括：
 `INVALID_INPUT` / `BRICK_NOT_FOUND` / `COMMAND_NOT_FOUND` / `DEPENDENCY_NOT_DECLARED` /
 `DEPENDENCY_COMMAND_NOT_ALLOWED` / `PERMISSION_DENIED` / `CURRENT_FOLDER_UNAVAILABLE` /
 `CANCELLED` / `INTERNAL_ERROR`。
@@ -564,9 +535,9 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 ## 协议与版本对齐
 
-- **白名单真相源**：[`specs/bpp.schema.json`](../../../specs/bpp.schema.json) 的 `BrickWindowMethod.enum`
+- **白名单真相源**：[`specs/window-protocol.schema.json`](../../../specs/window-protocol.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.5.0`（`SdkVersion`）；BPP 协议版本：`0.4.0`
+- 当前 SDK 版本：`0.6.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
 ---
@@ -578,16 +549,7 @@ go test ./...
 go test -v -run TestWhitelistMatchesSchema ./...   # 校验白名单与 schema 同步
 ```
 
-测试在同一进程内用 `io.Pipe` 模拟宿主-runtime 双向通信，覆盖：
-
-- `host.hello` → `runtime.ready` 握手与 `OnReady` 钩子
-- `runtime.ping` → `runtime.pong` 心跳
-- `command.invoke` 完整生命周期（progress / output / result）
-- `command.error` 与 `COMMAND_NOT_FOUND`
-- `hostCall` 请求-响应配对（创建窗口）
-- `WindowHandle.SetTitle` 反射到 `host.ui.window.call`
-- 窗口四态关闭、强制终止、终态去重、Map/handler 清理和 transport end
-- 白名单与 `specs/bpp.schema.json` 严格相等
+生产路径覆盖 gRPC `invoke` / `interact` 与 Host 服务。缺少 Host endpoint 时 `Start()` 必须拒绝启动。
 
 ---
 
@@ -597,13 +559,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.5.0
+npm run sdk:go:publish -- 0.6.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.5.0 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.6.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -611,14 +573,14 @@ npm run sdk:go:publish -- 0.5.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.5.0`
-- `git push origin <branch>` 和 `git push origin v0.5.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.5.0` 触发 Go module 缓存
+- `git tag -a v0.6.0`
+- `git push origin <branch>` 和 `git push origin v0.6.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.6.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.5.0
+go get github.com/836145715/brickly-sdk-go@v0.6.0
 ```
 
 ---
@@ -647,7 +609,7 @@ replace github.com/836145715/brickly-sdk-go => ../../../../packages/brickly-sdk-
 | --------------------------------------- | -------------------------------------------- |
 | `new BricklyRuntime({ brickId })`       | `brickly.New(brickly.Options{BrickID: ...})` |
 | `brick.onCommand(id, fn)`               | `p.OnCommand(id, fn)`                        |
-| `ctx.progress(v, msg)`                  | `ctx.Progress(v, msg)`                       |
+| `ctx.send(event)`                       | `ctx.Send(event)`                            |
 | `ctx.ui.createBrowserWindow(url, opts)` | `ctx.UI().CreateBrowserWindow(url, opts)`    |
 | `win.setBounds({...})`                  | `win.SetBounds(brickly.Bounds{...})`         |
 | `Promise<T>`                            | `(T, error)`                                 |
@@ -655,7 +617,7 @@ replace github.com/836145715/brickly-sdk-go => ../../../../packages/brickly-sdk-
 | `new BppError('CODE', msg)`             | `brickly.NewBppError("CODE", msg)`           |
 | `win.webContents.send(...)`             | `win.WebContents().Send(...)`                |
 
-行为一致：序列化字节级等价、协议请求 ID 前缀 `<brickId>-<pid>-<seq>`、stdout 仅写协议、业务日志走 `runtime.log`。
+行为一致：gRPC Runtime 方法、错误码与窗口白名单对齐。
 
 ### AI 对齐框架
 

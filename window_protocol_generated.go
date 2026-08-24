@@ -1,4 +1,4 @@
-// Generated from specs/bpp.schema.json. Do not edit by hand.
+// Generated from specs/window-protocol.schema.json. Do not edit by hand.
 package brickly
 
 var BrickWindowMethods = []string{
@@ -147,14 +147,6 @@ const (
 	WindowNativeFailed           WindowNativeStatus = "failed"
 )
 
-type WindowLifecycleReleaseStatus string
-
-const (
-	WindowLifecycleReleaseReleased WindowLifecycleReleaseStatus = "released"
-	WindowLifecycleReleaseQueued   WindowLifecycleReleaseStatus = "queued"
-	WindowLifecycleReleaseNotBound WindowLifecycleReleaseStatus = "not-bound"
-)
-
 type WindowTerminationError struct {
 	Step    string `json:"step"`
 	Message string `json:"message"`
@@ -165,10 +157,9 @@ type WindowRequestCloseResult struct {
 }
 
 type WindowTerminationResult struct {
-	Event     WindowTerminalEventStatus    `json:"event"`
-	Window    WindowNativeStatus           `json:"window"`
-	Lifecycle WindowLifecycleReleaseStatus `json:"lifecycle"`
-	Errors    []WindowTerminationError     `json:"errors"`
+	Event  WindowTerminalEventStatus `json:"event"`
+	Window WindowNativeStatus        `json:"window"`
+	Errors []WindowTerminationError  `json:"errors"`
 }
 
 type WindowClosedPayload struct {

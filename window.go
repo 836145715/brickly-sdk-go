@@ -50,7 +50,7 @@ type OpenDevToolsOptions struct {
 	Mode string `json:"mode,omitempty"`
 }
 
-// WindowHandle 是一个子窗口句柄，封装 host.ui.window.call 反射方法。
+// WindowHandle 是一个子窗口句柄，封装 ui.window.call 反射方法。
 //
 //   - 所有 setXxx / 动作方法返回 error。
 //   - 所有 getXxx / isXxx 返回 (值, error)。
@@ -103,7 +103,7 @@ func newWindowHandleFromResult(p *Runtime, key string, id, webContentsID int64, 
 	return handle
 }
 
-// Call 通用调用：走 host.ui.window.call 白名单。
+// Call 通用调用：走 ui.window.call 白名单。
 //
 // 通常你只需要用强类型方法（SetBounds / GetTitle / ...），但当宿主提前
 // 开放了新方法、而 SDK 尚未升级时，可用 Call 直接调用。
@@ -145,7 +145,6 @@ func (w *WindowHandle) callWithParentTrace(method string, args []any, parentRequ
 		return parentInvocationRequired("webContents.Send must run through CommandContext.UI or include payload.requestId")
 	}
 	msg := map[string]any{
-		"type":     "host.ui.window.call",
 		"windowId": w.ID,
 		"method":   method,
 		"args":     args,
@@ -153,8 +152,7 @@ func (w *WindowHandle) callWithParentTrace(method string, args []any, parentRequ
 	if parentRequestID != "" {
 		msg["parentRequestId"] = parentRequestID
 	}
-	withTrace(msg, trace)
-	return runtime.transport.hostCall(msg, into)
+	return runtime.platformCall("ui.window.call", msg, into)
 }
 
 // Close 请求普通关闭；pending/prevented 时句柄保持可用。
@@ -180,12 +178,11 @@ func (w *WindowHandle) Close() (WindowRequestCloseResult, error) {
 	}
 
 	var result WindowRequestCloseResult
-	err := runtime.transport.hostCall(map[string]any{
-		"type":     "host.ui.window.requestClose",
+	err := runtime.platformCall("ui.window.requestClose", map[string]any{
 		"windowId": w.ID,
 	}, &result)
 	if err == nil && !validWindowCloseStatus(result.Status) {
-		err = NewBppError("PROTOCOL_ERROR", "host.ui.window.requestClose returned an invalid result")
+		err = NewBppError("PROTOCOL_ERROR", "ui.window.requestClose returned an invalid result")
 	}
 	if err == nil && (result.Status == WindowCloseClosed || result.Status == WindowCloseNotFound) {
 		w.disposeLocal("")
@@ -218,12 +215,11 @@ func (w *WindowHandle) ForceClose() (WindowTerminationResult, error) {
 	}
 
 	var result WindowTerminationResult
-	err := runtime.transport.hostCall(map[string]any{
-		"type":     "host.ui.window.forceClose",
+	err := runtime.platformCall("ui.window.forceClose", map[string]any{
 		"windowId": w.ID,
 	}, &result)
 	if err == nil && !validWindowTerminationResult(result) {
-		err = NewBppError("PROTOCOL_ERROR", "host.ui.window.forceClose returned an invalid result")
+		err = NewBppError("PROTOCOL_ERROR", "ui.window.forceClose returned an invalid result")
 	}
 	if err == nil {
 		w.disposeLocal("")
@@ -358,8 +354,7 @@ func validWindowCloseStatus(status WindowCloseStatus) bool {
 func validWindowTerminationResult(result WindowTerminationResult) bool {
 	validEvent := result.Event == WindowTerminalEventSent || result.Event == WindowTerminalEventSkipped || result.Event == WindowTerminalEventFailed
 	validWindow := result.Window == WindowNativeDestroyed || result.Window == WindowNativeAlreadyDestroyed || result.Window == WindowNativeFailed
-	validLifecycle := result.Lifecycle == WindowLifecycleReleaseReleased || result.Lifecycle == WindowLifecycleReleaseQueued || result.Lifecycle == WindowLifecycleReleaseNotBound
-	return validEvent && validWindow && validLifecycle && result.Errors != nil
+	return validEvent && validWindow && result.Errors != nil
 }
 
 // —— 以下是窗口反射方法的强类型包装，按 specs/window-api.md 分组 ——

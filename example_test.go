@@ -3,7 +3,6 @@ package brickly_test
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	brickly "github.com/836145715/brickly-sdk-go"
 )
@@ -51,14 +50,6 @@ func Example_window() {
 		win.On("closed", func(payload map[string]any) {
 			_ = ctx.Events().Publish("pet.closed", payload)
 		})
-
-		// 模拟一个进度
-		go func() {
-			for i := 1; i <= 5; i++ {
-				ctx.Progress(float64(i)/5, "")
-				time.Sleep(10 * time.Millisecond)
-			}
-		}()
 
 		return map[string]any{"windowId": win.ID}, nil
 	})
