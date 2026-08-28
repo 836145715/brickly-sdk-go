@@ -53,7 +53,7 @@ func TestInteractSendAndOnEvent(t *testing.T) {
 }
 
 func TestCommandContextUnarySend(t *testing.T) {
-	p := New(Options{BrickID: "com.test.interact"})
+	p := New()
 	ctx := newCommandContext(p, "req", "uppercase", CommandInvocationContext{Source: "unknown"}, nil)
 	if err := ctx.Send("x"); err == nil {
 		t.Fatal("expected PROTOCOL_ERROR")
@@ -61,7 +61,7 @@ func TestCommandContextUnarySend(t *testing.T) {
 }
 
 func TestCommandContextSendThenReturn(t *testing.T) {
-	p := New(Options{BrickID: "com.test.interact"})
+	p := New()
 	ctx := newCommandContext(p, "req", "complete", CommandInvocationContext{Source: "unknown"}, nil)
 	incoming := make(chan any)
 	var sent []any
@@ -84,7 +84,7 @@ func TestCommandContextSendThenReturn(t *testing.T) {
 }
 
 func TestCommandContextOnEventThenClosed(t *testing.T) {
-	p := New(Options{BrickID: "com.test.interact"})
+	p := New()
 	ctx := newCommandContext(p, "req", "chat", CommandInvocationContext{Source: "unknown"}, nil)
 	incoming := make(chan any, 2)
 	var sent []any

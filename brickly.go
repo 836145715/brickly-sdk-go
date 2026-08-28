@@ -2,7 +2,7 @@
 //
 // 与 @syllm/brickly-sdk (Node) 保持一致的 API 表面与语义：
 //
-//	p := brickly.New(brickly.Options{BrickID: "com.example.foo"})
+//	p := brickly.New()
 //	p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
 //	    return map[string]any{"ok": true}, nil
 //	})
@@ -24,14 +24,6 @@ import (
 	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
 )
 
-// Options 是 New 的可选配置。
-type Options struct {
-	// 必填：Brick id，仅用于生成协议请求 id 前缀；Runtime 身份由宿主 manifest 决定。
-	BrickID string
-	// 可选：协议版本。默认 ProtocolVersion。
-	ProtocolVersion string
-}
-
 // CommandHandler 是 OnCommand 注册的业务处理函数。
 //
 // 返回 (result, nil) 时 SDK 通过 gRPC 回传结果；
@@ -48,9 +40,6 @@ const maxTerminalWindowEventIDs = 1024
 
 // Runtime 是 SDK 主入口，通过 New 创建。
 type Runtime struct {
-	brickID         string
-	protocolVersion string
-
 	// UI / Events / Platform 与 Node SDK 的 brick.ui / brick.events /
 	// brick.platform 同源。System 是 Platform.System 的便捷别名。
 	UI           *UI
@@ -85,13 +74,8 @@ type Runtime struct {
 }
 
 // New 创建并返回一个 Runtime 实例。不会连接 Host——那是 Start 的职责。
-func New(opts Options) *Runtime {
-	if opts.BrickID == "" {
-		panic("brickly: Options.BrickID is required")
-	}
+func New() *Runtime {
 	p := &Runtime{
-		brickID:                opts.BrickID,
-		protocolVersion:        firstNonEmpty(opts.ProtocolVersion, ProtocolVersion),
 		commandHandlers:        make(map[string]CommandHandler),
 		cancelHandlers:         make(map[string]context.CancelFunc),
 		cancelled:              make(map[string]bool),
@@ -308,9 +292,6 @@ type rawMessage struct {
 	Raw  map[string]any
 }
 
-// BrickID 返回当前 Brick id。
-func (p *Runtime) BrickID() string { return p.brickID }
-
 func (p *Runtime) handleEventNotify(msg rawMessage) {
 	event, _ := msg.Raw["event"].(string)
 	payloadRaw := msg.Raw["payload"]
@@ -391,11 +372,3 @@ func (p *Runtime) rememberTerminalWindowEvent(eventID string) bool {
 	return true
 }
 
-// —— 小工具 ——
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}

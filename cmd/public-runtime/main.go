@@ -2,13 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/836145715/brickly-sdk-go"
 )
 
 func main() {
-	runtime := brickly.New(brickly.Options{BrickID: "com.brickly.public"})
+	runtime := brickly.New()
 	runtime.OnCommand("hello", func(_ *brickly.CommandContext, input json.RawMessage) (any, error) {
 		var payload struct {
 			Name string `json:"name"`
@@ -22,9 +21,6 @@ func main() {
 		handle, err := runtime.CreateResource([]byte("grpc-bytes"), &brickly.ResourceCreateOptions{Name: "note.bin"})
 		if err != nil {
 			return nil, err
-		}
-		if handle.Ref.AccessToken != "" {
-			return nil, fmt.Errorf("ResourceRef 不应包含 accessToken")
 		}
 		text, err := handle.Text()
 		if err != nil {

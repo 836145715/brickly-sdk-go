@@ -49,7 +49,7 @@ func registerTestWindow(p *Runtime, id int64) *WindowHandle {
 }
 
 func TestDependencyBindingsIsolateSameIDVersionsAndReturnCopies(t *testing.T) {
-	p := New(Options{BrickID: "com.test.dependencies"})
+	p := New()
 	reviewRef := BrickRef{BrickID: testTargetRef.BrickID, Origin: BrickOriginReview, Version: "2.0.0"}
 	if err := p.Dependencies.replace(BrickDependencyBindings{
 		"installed_tool": testTargetRef,
@@ -76,7 +76,7 @@ func TestDependencyBindingsIsolateSameIDVersionsAndReturnCopies(t *testing.T) {
 }
 
 func TestPublicSurfaceExposesRuntimeAPIs(t *testing.T) {
-	p := New(Options{BrickID: "com.test"})
+	p := New()
 	if p.UI == nil || p.Events == nil || p.Platform == nil || p.System == nil {
 		t.Fatalf("missing runtime APIs: %+v", p)
 	}
@@ -86,13 +86,13 @@ func TestPublicSurfaceExposesRuntimeAPIs(t *testing.T) {
 }
 
 func TestRuntimeInvokeOutsideCommandRequiresRootAPI(t *testing.T) {
-	p := New(Options{BrickID: "com.test.invoke-parent"})
+	p := New()
 	dependency := testDependency(t, p)
 	assertBppErrorCode(t, dependency.Invoke("run", nil, nil), "PARENT_INVOCATION_REQUIRED")
 }
 
 func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
-	p := New(Options{BrickID: "com.test.invocation"})
+	p := New()
 	explicit := CommandInvocationContext{
 		Source:             "hotkey",
 		TriggerID:          "open",
@@ -112,7 +112,7 @@ func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
 }
 
 func TestWindowClosedEventIsDeduplicatedAndClearsReferences(t *testing.T) {
-	p := New(Options{BrickID: "com.test.window-event"})
+	p := New()
 	handle := registerTestWindow(p, 30)
 	handleEvents := make(chan struct{}, 2)
 	runtimeEvents := make(chan struct{}, 2)
@@ -154,7 +154,7 @@ func TestWindowClosedEventIsDeduplicatedAndClearsReferences(t *testing.T) {
 }
 
 func TestTerminalWindowEventDedupIsBounded(t *testing.T) {
-	p := New(Options{BrickID: "com.test.window-dedup"})
+	p := New()
 	for index := 0; index < maxTerminalWindowEventIDs+1; index++ {
 		p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
 			"type": "event.notify", "event": "window.closed",
@@ -173,7 +173,7 @@ func TestTerminalWindowEventDedupIsBounded(t *testing.T) {
 }
 
 func TestRuntimeEndDisposesAllWindowHandles(t *testing.T) {
-	p := New(Options{BrickID: "com.test.window-end"})
+	p := New()
 	handle := registerTestWindow(p, 40)
 	handle.On("move", func(map[string]any) {})
 
@@ -194,7 +194,7 @@ func TestRuntimeEndDisposesAllWindowHandles(t *testing.T) {
 }
 
 func TestRuntimeWebContentsSendOutsideCommandRequiresParent(t *testing.T) {
-	p := New(Options{BrickID: "com.test.webcontents"})
+	p := New()
 	handle := newWindowHandle(p, 12)
 	assertBppErrorCode(t, handle.WebContents().Send("ch", map[string]any{"x": 1}), "PARENT_INVOCATION_REQUIRED")
 }

@@ -59,10 +59,9 @@ func TestSharedFixtureOnlyTransfersResourceRefAcrossGoHops(t *testing.T) {
 
 func testResourceRef(id string, size int64) ResourceRef {
 	return ResourceRef{
-		Kind:        "brickly.resource",
-		ResourceID:  id,
-		AccessToken: "secret",
-		SizeBytes:   size,
+		Kind:       "brickly.resource",
+		ResourceID: id,
+		SizeBytes:  size,
 		SHA256:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		ExpiresAt:   2_000_000_000_000,
 		MimeType:    "text/plain",
@@ -71,7 +70,7 @@ func testResourceRef(id string, size int64) ResourceRef {
 }
 
 func TestRuntimeOpenResourceIsLazyAndReturnsIndependentHandles(t *testing.T) {
-	p := New(Options{BrickID: "com.test.open-resource"})
+	p := New()
 	ref := testResourceRef("go-open", 3)
 
 	first, err := p.OpenResource(ref)
@@ -90,7 +89,7 @@ func TestRuntimeOpenResourceIsLazyAndReturnsIndependentHandles(t *testing.T) {
 }
 
 func TestEventsPublishRejectsMalformedNestedResource(t *testing.T) {
-	p := New(Options{BrickID: "com.test.event-resource"})
+	p := New()
 	err := p.Events.Publish("file:broken", map[string]any{
 		"file": map[string]any{"kind": "brickly.resource", "resourceId": "broken"},
 	})
@@ -121,7 +120,7 @@ func TestPrepareResourceValueHandlesTypedContainersAndRejectsMalformedRefs(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(encoded), `"accessToken":"secret"`) != 2 {
+	if strings.Count(string(encoded), `"resourceId":"typed-resource"`) != 2 {
 		t.Fatalf("typed resources were not preserved as complete refs: %s", encoded)
 	}
 
@@ -131,7 +130,7 @@ func TestPrepareResourceValueHandlesTypedContainersAndRejectsMalformedRefs(t *te
 }
 
 func TestInvokeRootRejectsMalformedResourceBeforeSending(t *testing.T) {
-	p := New(Options{BrickID: "com.test.invoke-resource"})
+	p := New()
 	dependency := testDependency(t, p)
 	err := dependency.InvokeRoot(
 		"run",
@@ -142,7 +141,7 @@ func TestInvokeRootRejectsMalformedResourceBeforeSending(t *testing.T) {
 }
 
 func TestEventsOnOnlyHydratesOuterResourceEnvelope(t *testing.T) {
-	p := New(Options{BrickID: "com.test.event-hydrate"})
+	p := New()
 	ref := testResourceRef("go-event-result", 3)
 	encoded, err := json.Marshal(ref)
 	if err != nil {

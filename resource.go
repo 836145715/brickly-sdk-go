@@ -18,11 +18,10 @@ import (
 const MaxResourceMaterializationBytes int64 = 200 * 1024 * 1024
 const maxResourceValueDepth = 64
 
-// ResourceRef 是宿主资源的短期能力引用。accessToken 只用于协议传输，ToJSON 会脱敏。
+// ResourceRef 是宿主资源的短期能力引用。
 type ResourceRef struct {
 	Kind        string `json:"kind"`
 	ResourceID  string `json:"resourceId"`
-	AccessToken string `json:"accessToken"`
 	SizeBytes   int64  `json:"sizeBytes"`
 	MimeType    string `json:"mimeType,omitempty"`
 	Name        string `json:"name,omitempty"`
@@ -403,7 +402,7 @@ func prepareResourceReflectValue(value reflect.Value, depth int) (any, error) {
 
 func resourceRefPayload(ref ResourceRef) map[string]any {
 	out := map[string]any{
-		"kind": ref.Kind, "resourceId": ref.ResourceID, "accessToken": ref.AccessToken,
+		"kind": ref.Kind, "resourceId": ref.ResourceID,
 		"sizeBytes": ref.SizeBytes, "sha256": ref.SHA256, "expiresAt": ref.ExpiresAt,
 	}
 	if ref.MimeType != "" {
@@ -510,7 +509,7 @@ func protoToSDKResourceRef(ref *runtimegrpc.ResourceRef) ResourceRef {
 // MarshalJSON 使 ResourceHandle 作为命令输入/输出时只传递引用。
 func (h *ResourceHandle) MarshalJSON() ([]byte, error) { return json.Marshal(h.Ref) }
 
-// ToJSON 返回脱敏诊断视图。
+// ToJSON 返回诊断视图。
 func (h *ResourceHandle) ToJSON() map[string]any {
 	value := map[string]any{
 		"kind": h.Ref.Kind, "resourceId": h.Ref.ResourceID, "sizeBytes": h.Ref.SizeBytes,

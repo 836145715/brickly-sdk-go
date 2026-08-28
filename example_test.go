@@ -10,7 +10,7 @@ import (
 // Example_minimal 展示最简 Brick 骨架：一个命令 + ready 钩子。
 // 真正用作 Brick 二进制时，请在 main 包里调用 p.Start()（会阻塞）。
 func Example_minimal() {
-	p := brickly.New(brickly.Options{BrickID: "com.example.minimal"})
+	p := brickly.New()
 
 	p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
 		var in struct {
@@ -28,7 +28,7 @@ func Example_minimal() {
 
 // Example_window 展示创建子窗口、设置属性、订阅事件。
 func Example_window() {
-	p := brickly.New(brickly.Options{BrickID: "com.example.pet"})
+	p := brickly.New()
 
 	p.OnCommand("spawn", func(ctx *brickly.CommandContext, _ json.RawMessage) (any, error) {
 		win, err := ctx.UI().CreateBrowserWindow("ui/pet.html", brickly.WindowOptions{

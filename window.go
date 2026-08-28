@@ -455,11 +455,6 @@ func (w *WindowHandle) SetFullScreen(flag bool) error {
 	return w.Call("setFullScreen", []any{flag}, nil)
 }
 
-// Destroy 是旧便利名，统一进入强制终止事务。
-func (w *WindowHandle) Destroy() (WindowTerminationResult, error) {
-	return w.ForceClose()
-}
-
 // 3. 状态查询（23，全部 bool）============================================
 
 func boolCall(w *WindowHandle, method string) (bool, error) {

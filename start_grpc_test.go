@@ -9,7 +9,7 @@ import (
 func TestStartRejectsBppFallback(t *testing.T) {
 	t.Setenv(runtimegrpc.HostEndpointEnv, "")
 
-	runtime := New(Options{BrickID: "com.example.grpc-start"})
+	runtime := New()
 	runtime.Start()
 	if runtime.started.Load() {
 		t.Fatal("Start() must not mark runtime started without BRICKLY_HOST_ENDPOINT")

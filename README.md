@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-    p := brickly.New(brickly.Options{BrickID: "com.example.go-demo"})
+    p := brickly.New()
 
     p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
         _ = ctx.Send(map[string]any{"type": "hello"})
@@ -57,7 +57,7 @@ SDK 自动完成：
 
 ## 核心 API
 
-### `Runtime`（`brickly.New(Options{...})` 返回）
+### `Runtime`（`brickly.New()` 返回）
 
 | 方法                                               | 作用                                                                       |
 | -------------------------------------------------- | -------------------------------------------------------------------------- |
@@ -382,7 +382,6 @@ if err == nil && (result.Status == brickly.WindowClosePending || result.Status =
 }
 
 termination, err := win.ForceClose()
-termination, err = win.Destroy() // 旧便利名，等价于 ForceClose
 ```
 
 终态后 `IsClosed()` 返回 true，Runtime Map 和该句柄的全部 handler 会被清空。并发 `Close()` 共享在途请求；重复 `window.closed.eventId` 有界去重；Runtime 结束时执行同样的本地释放。
@@ -607,7 +606,7 @@ replace github.com/836145715/brickly-sdk-go => ../../../../packages/brickly-sdk-
 
 | Node SDK                                | Go SDK                                       |
 | --------------------------------------- | -------------------------------------------- |
-| `new BricklyRuntime({ brickId })`       | `brickly.New(brickly.Options{BrickID: ...})` |
+| `new BricklyRuntime({ brickId })`       | `brickly.New()` |
 | `brick.onCommand(id, fn)`               | `p.OnCommand(id, fn)`                        |
 | `ctx.send(event)`                       | `ctx.Send(event)`                            |
 | `ctx.ui.createBrowserWindow(url, opts)` | `ctx.UI().CreateBrowserWindow(url, opts)`    |
