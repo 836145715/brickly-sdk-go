@@ -1,0 +1,25 @@
+# Changelog
+
+## Unreleased
+
+## 0.7.0
+
+### Breaking
+
+- Runtime 构造改为 `brickly.New()`，删除 `Options`、`brickId` / `protocolVersion` 参数和 `BrickID()`。
+- 删除公开别名：`OnInvoke`、`OnInteract`、`WindowHandle.Destroy()`。
+- `ResourceRef` 不再包含 `AccessToken`。
+- 删除 `InvokeResource` / `InvokeRootResource`。`Invoke` / `InvokeRoot` 不水合；
+  读取走 `Resources.Open(ref)`。
+
+### Features
+
+- `ResourceHandle.Bytes()` 公开整份字节读取，上限仍为 200 MiB。
+
+## 0.6.0
+
+### Breaking
+
+- 生产协议切换到 `brickly.runtime.v1`（loopback gRPC `invoke` / `interact`）。
+- `ProtocolVersion` 改为 `brickly.runtime.v1`；删除 BPP / `host.hello` / stdin fallback。
+- `WindowTerminationResult` 不再包含 `lifecycle`（`released` / `queued` / `not-bound`）。

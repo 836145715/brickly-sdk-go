@@ -537,6 +537,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 - **白名单真相源**：[`specs/window-protocol.schema.json`](../../../specs/window-protocol.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
 - 当前 SDK 版本：`0.7.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
+- 发布记录见 [`CHANGELOG.md`](./CHANGELOG.md)
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
 ---
