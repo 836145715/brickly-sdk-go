@@ -536,7 +536,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/window-protocol.schema.json`](../../../specs/window-protocol.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.6.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
+- 当前 SDK 版本：`0.7.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
 ---
@@ -558,13 +558,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.6.0
+npm run sdk:go:publish -- 0.7.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.6.0 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.7.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -572,14 +572,14 @@ npm run sdk:go:publish -- 0.6.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.6.0`
-- `git push origin <branch>` 和 `git push origin v0.6.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.6.0` 触发 Go module 缓存
+- `git tag -a v0.7.0`
+- `git push origin <branch>` 和 `git push origin v0.7.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.7.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.6.0
+go get github.com/836145715/brickly-sdk-go@v0.7.0
 ```
 
 ---
