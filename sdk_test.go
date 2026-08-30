@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,13 +112,70 @@ func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
 	}
 }
 
+func TestWindowHostEventTopicsMatchNode(t *testing.T) {
+	want := []string{
+		"window.notify",
+		"window.request",
+		"window.request.cancel",
+		"window.closed",
+		"window.focus",
+		"window.blur",
+		"window.resize",
+		"window.move",
+		"window.show",
+		"window.hide",
+	}
+	if len(windowHostEventTopics) != len(want) {
+		t.Fatalf("len=%d want %d", len(windowHostEventTopics), len(want))
+	}
+	for i, topic := range want {
+		if windowHostEventTopics[i] != topic {
+			t.Fatalf("topic[%d]=%s want %s", i, windowHostEventTopics[i], topic)
+		}
+	}
+	p := New()
+	p.ensureEventSub("clipboard:new-content")
+	if p.eventSubCount() != 0 {
+		t.Fatal("ensureEventSub must no-op before Host EventService is connected")
+	}
+}
+
+func TestEventsOnRejectsWindowProtocolAndBareNames(t *testing.T) {
+	p := New()
+	for _, event := range []string{"tick", "window.closed", "window.notify", "window.request"} {
+		func() {
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					t.Fatalf("Events.On(%q) should panic", event)
+				}
+				err, ok := recovered.(*BppError)
+				if !ok || err.Code != "INVALID_INPUT" {
+					t.Fatalf("Events.On(%q) recovered %#v", event, recovered)
+				}
+				if !strings.Contains(err.Message, "无效的事件名："+event) || !strings.Contains(err.Message, "命名空间:主题") {
+					t.Fatalf("Events.On(%q) message=%s", event, err.Message)
+				}
+			}()
+			p.Events.On(event, func(any, EventEnvelope) {})
+		}()
+	}
+	if err := p.Events.Publish("window.notify", map[string]any{"name": "echo"}); err == nil {
+		t.Fatal("Publish(window.notify) should fail")
+	} else {
+		assertBppErrorCode(t, err, "INVALID_INPUT")
+		if !strings.Contains(err.Error(), "无效的事件名：window.notify") || !strings.Contains(err.Error(), "命名空间:主题") {
+			t.Fatalf("Publish message=%s", err.Error())
+		}
+	}
+	p.Events.On("clipboard:new-content", func(any, EventEnvelope) {})
+}
+
 func TestWindowClosedEventIsDeduplicatedAndClearsReferences(t *testing.T) {
 	p := New()
 	handle := registerTestWindow(p, 30)
 	handleEvents := make(chan struct{}, 2)
-	runtimeEvents := make(chan struct{}, 2)
 	handle.On("closed", func(map[string]any) { handleEvents <- struct{}{} })
-	p.Events.On("window.closed", func(any, EventEnvelope) { runtimeEvents <- struct{}{} })
 	message := rawMessage{Type: "event.notify", Raw: map[string]any{
 		"type": "event.notify", "event": "window.closed",
 		"payload": map[string]any{
@@ -133,13 +191,8 @@ func TestWindowClosedEventIsDeduplicatedAndClearsReferences(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("window handler was not called")
 	}
-	select {
-	case <-runtimeEvents:
-	case <-time.After(time.Second):
-		t.Fatal("runtime handler was not called")
-	}
 	time.Sleep(25 * time.Millisecond)
-	if len(handleEvents) != 0 || len(runtimeEvents) != 0 {
+	if len(handleEvents) != 0 {
 		t.Fatal("duplicate eventId must not invoke callbacks twice")
 	}
 	p.windowsMu.RLock()
@@ -199,6 +252,156 @@ func TestRuntimeWebContentsSendOutsideCommandRequiresParent(t *testing.T) {
 	assertBppErrorCode(t, handle.WebContents().Send("ch", map[string]any{"x": 1}), "PARENT_INVOCATION_REQUIRED")
 }
 
+func TestWindowExposeHandlesRequestAndNotExposed(t *testing.T) {
+	p := New()
+	handle := registerTestWindow(p, 7)
+	if err := handle.Expose(map[string]WindowExposeHandler{
+		"pause": func(payload any, session WindowExposeSession) (any, error) {
+			return map[string]any{"paused": true}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.request",
+		"payload": map[string]any{
+			"windowId":  float64(7),
+			"requestId": "req-1",
+			"name":      "pause",
+		},
+	}})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		handle.exposeMu.RLock()
+		reply := handle.lastReply
+		handle.exposeMu.RUnlock()
+		if reply != nil {
+			inner, _ := reply["reply"].(map[string]any)
+			if inner["ok"] == true {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	handle.exposeMu.RLock()
+	okReply := handle.lastReply
+	handle.exposeMu.RUnlock()
+	if okReply == nil {
+		t.Fatal("expected expose reply")
+	}
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.request",
+		"payload": map[string]any{
+			"windowId":  float64(7),
+			"requestId": "req-2",
+			"name":      "missing",
+		},
+	}})
+	time.Sleep(20 * time.Millisecond)
+	handle.exposeMu.RLock()
+	missing := handle.lastReply
+	handle.exposeMu.RUnlock()
+	inner, _ := missing["reply"].(map[string]any)
+	errObj, _ := inner["error"].(map[string]any)
+	if errObj["code"] != "NOT_EXPOSED" {
+		t.Fatalf("want NOT_EXPOSED, got %#v", missing)
+	}
+
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.closed",
+		"payload": map[string]any{
+			"eventId":   "closed:go-window-7",
+			"windowKey": "go-window-7",
+			"windowId":  float64(7),
+			"cause":     "window-closed",
+			"forced":    false,
+		},
+	}})
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.request",
+		"payload": map[string]any{
+			"windowId":  float64(7),
+			"requestId": "req-gone",
+			"name":      "pause",
+		},
+	}})
+	time.Sleep(20 * time.Millisecond)
+	handle.exposeMu.RLock()
+	afterClose := handle.lastReply
+	handle.exposeMu.RUnlock()
+	if afterClose != nil {
+		if id, _ := afterClose["requestId"].(string); id == "req-gone" {
+			t.Fatal("closed window must not reply to later request")
+		}
+	}
+	p.windowsMu.RLock()
+	_, stillThere := p.windows[7]
+	p.windowsMu.RUnlock()
+	if stillThere {
+		t.Fatal("closed window must leave the runtime map")
+	}
+}
+
+func TestWindowExposeCancelAndEventScope(t *testing.T) {
+	p := New()
+	handle := registerTestWindow(p, 8)
+	started := make(chan struct{})
+	if err := handle.Expose(map[string]WindowExposeHandler{
+		"hang": func(_ any, session WindowExposeSession) (any, error) {
+			close(started)
+			select {
+			case <-session.Done:
+				return nil, NewBppError("CANCELLED", "aborted")
+			case <-time.After(time.Second):
+				return nil, NewBppError("REQUEST_TIMEOUT", "should have been cancelled")
+			}
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.request",
+		"payload": map[string]any{
+			"windowId":  float64(8),
+			"requestId": "req-hang",
+			"name":      "hang",
+		},
+	}})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	if !p.isCommandActive("req-hang") {
+		t.Fatal("child request must be live for invoke parent")
+	}
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.request.cancel",
+		"payload": map[string]any{
+			"windowId":  float64(8),
+			"requestId": "req-hang",
+		},
+	}})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		handle.exposeMu.RLock()
+		reply := handle.lastReply
+		handle.exposeMu.RUnlock()
+		if reply != nil {
+			if id, _ := reply["requestId"].(string); id == "req-hang" {
+				inner, _ := reply["reply"].(map[string]any)
+				errObj, _ := inner["error"].(map[string]any)
+				if errObj["code"] != "CANCELLED" {
+					t.Fatalf("want CANCELLED, got %#v", reply)
+				}
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("cancelled request did not reply")
+}
+
 func TestWhitelistMatchesSchema(t *testing.T) {
 	seen := map[string]bool{}
 	for _, m := range BrickWindowMethods {
@@ -252,5 +455,21 @@ func TestWhitelistMatchesSchema(t *testing.T) {
 		if !seen[m] {
 			t.Errorf("schema has %q but SDK doesn't", m)
 		}
+	}
+}
+
+func TestReadInjectedProfileConfig(t *testing.T) {
+	if got := readInjectedProfileConfig(""); len(got) != 0 {
+		t.Fatalf("empty env should be empty config, got %#v", got)
+	}
+	got := readInjectedProfileConfig(`{"host":"db"}`)
+	if got["host"] != "db" {
+		t.Fatalf("expected host=db, got %#v", got)
+	}
+	if got := readInjectedProfileConfig("not-json"); len(got) != 0 {
+		t.Fatalf("invalid json should be ignored, got %#v", got)
+	}
+	if got := readInjectedProfileConfig("[]"); len(got) != 0 {
+		t.Fatalf("array should be ignored, got %#v", got)
 	}
 }

@@ -109,17 +109,25 @@ func (c *CommandContext) System() *SystemAPI {
 // Config 返回由 Host 注入的当前 Profile 配置快照。
 func (c *CommandContext) Config() map[string]any { return c.runtime.Config }
 
-// Debug 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (c *CommandContext) Debug(string, map[string]any) {}
+// Debug 挂到当前 command；handler 返回后的异步日志请继续用 Runtime.Debug。
+func (c *CommandContext) Debug(message string, fields map[string]any) {
+	c.runtime.emitBrickLog("debug", message, nil, fields, c.RequestID)
+}
 
-// Info 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (c *CommandContext) Info(string, map[string]any) {}
+// Info 挂到当前 command；handler 返回后的异步日志请继续用 Runtime.Info。
+func (c *CommandContext) Info(message string, fields map[string]any) {
+	c.runtime.emitBrickLog("info", message, nil, fields, c.RequestID)
+}
 
-// Warn 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (c *CommandContext) Warn(string, map[string]any) {}
+// Warn 挂到当前 command；handler 返回后的异步日志请继续用 Runtime.Warn。
+func (c *CommandContext) Warn(message string, fields map[string]any) {
+	c.runtime.emitBrickLog("warn", message, nil, fields, c.RequestID)
+}
 
-// Error 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (c *CommandContext) Error(string, error, map[string]any) {}
+// Error 挂到当前 command；handler 返回后的异步日志请继续用 Runtime.Error。
+func (c *CommandContext) Error(message string, err error, fields map[string]any) {
+	c.runtime.emitBrickLog("error", message, err, fields, c.RequestID)
+}
 
 // Dependencies 返回绑定当前 command parent、trace 与 Profile 的依赖注册表。
 func (c *CommandContext) Dependencies() *ScopedDependencyRegistry {

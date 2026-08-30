@@ -45,7 +45,7 @@ type StartOptions struct {
 	RuntimeToHostToken string
 	HostToRuntimeToken string
 	Commands           []string
-	Invoke             func(commandID string, input *BrickValue) (*BrickValue, error)
+	Invoke             func(commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
 	Interact           func(commandID string, session InteractSession) (any, error)
 }
 
@@ -80,13 +80,13 @@ func TakeRuntimeEnv() (StartOptions, error) {
 type commandServer struct {
 	UnimplementedBrickCommandServiceServer
 	hostToken string
-	invoke    func(commandID string, input *BrickValue) (*BrickValue, error)
+	invoke    func(commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
 	interact  func(commandID string, session InteractSession) (any, error)
 }
 
-func (s *commandServer) Invoke(_ context.Context, request *InvokeRequest) (*InvokeResult, error) {
+func (s *commandServer) Invoke(ctx context.Context, request *InvokeRequest) (*InvokeResult, error) {
 	if s.invoke != nil {
-		result, err := s.invoke(request.GetCommandId(), request.GetInput())
+		result, err := s.invoke(request.GetCommandId(), request.GetInput(), incomingMetadataValue(ctx, InvocationIdMD))
 		if err != nil {
 			return nil, StatusFromError(err)
 		}
@@ -194,4 +194,16 @@ func authorizeHost(ctx context.Context, expected string) error {
 		return status.Error(codes.Unauthenticated, "host token 无效")
 	}
 	return nil
+}
+
+func incomingMetadataValue(ctx context.Context, key string) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	values := md.Get(key)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }

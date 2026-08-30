@@ -33,9 +33,12 @@ type EventBus struct {
 	counter atomic.Uint64
 }
 
-// On 订阅事件，返回取消订阅函数（幂等）。
-// 常用事件：window.closed / window.focus / window.blur / window.message / window.resize ...
+// On 订阅公共事件，返回取消订阅函数（幂等）。
+// 名字必须是「命名空间:主题」，例如 clipboard:new-content。window.* 只走 WindowHandle.On。
 func (e *EventBus) On(event string, fn EventHandler) func() {
+	if err := requirePublicEventName(event); err != nil {
+		panic(err)
+	}
 	id := e.counter.Add(1)
 	e.mu.Lock()
 	if e.subs == nil {
@@ -46,17 +49,29 @@ func (e *EventBus) On(event string, fn EventHandler) func() {
 	}
 	e.subs[event][id] = fn
 	e.mu.Unlock()
+	e.runtime.ensureEventSub(event)
 	return func() {
 		e.mu.Lock()
-		defer e.mu.Unlock()
+		empty := false
 		if m := e.subs[event]; m != nil {
 			delete(m, id)
+			if len(m) == 0 {
+				delete(e.subs, event)
+				empty = true
+			}
+		}
+		e.mu.Unlock()
+		if empty {
+			e.runtime.dropEventSub(event)
 		}
 	}
 }
 
 // Publish 发布事件到事件总线（走 Host EventService）。
 func (e *EventBus) Publish(event string, payload any) error {
+	if err := requirePublicEventName(event); err != nil {
+		return err
+	}
 	prepared, err := prepareResourceValue(payload)
 	if err != nil {
 		return err

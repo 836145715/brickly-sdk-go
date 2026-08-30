@@ -20,13 +20,13 @@ const maxResourceValueDepth = 64
 
 // ResourceRef 是宿主资源的短期能力引用。
 type ResourceRef struct {
-	Kind        string `json:"kind"`
-	ResourceID  string `json:"resourceId"`
-	SizeBytes   int64  `json:"sizeBytes"`
-	MimeType    string `json:"mimeType,omitempty"`
-	Name        string `json:"name,omitempty"`
-	SHA256      string `json:"sha256"`
-	ExpiresAt   int64  `json:"expiresAt"`
+	Kind       string `json:"kind"`
+	ResourceID string `json:"resourceId"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	MimeType   string `json:"mimeType,omitempty"`
+	Name       string `json:"name,omitempty"`
+	SHA256     string `json:"sha256"`
+	ExpiresAt  int64  `json:"expiresAt"`
 }
 
 type ResourceCreateOptions struct {

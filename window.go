@@ -56,7 +56,7 @@ type OpenDevToolsOptions struct {
 //   - 所有 getXxx / isXxx 返回 (值, error)。
 //   - 关闭后再调用（除 IsDestroyed）会立即返回 INVALID_INPUT。
 //
-// 事件通过 On("closed" / "focus" / "blur" / "message" / ...) 订阅。
+// 事件通过 On("closed" / "focus" / "blur" / "resize" / ...) 订阅。
 type WindowHandle struct {
 	ID            int64
 	WindowKey     string
@@ -73,7 +73,21 @@ type WindowHandle struct {
 	handlersMu sync.RWMutex
 	handlers   map[string]map[uint64]func(payload map[string]any)
 	handlerSeq atomic.Uint64
+
+	exposeMu  sync.RWMutex
+	exposed   map[string]WindowExposeHandler
+	inflight  map[string]chan struct{}
+	lastReply map[string]any
 }
+
+// WindowExposeSession 是子窗 request 进行中的会话。
+type WindowExposeSession struct {
+	Emit func(event any) error
+	Done <-chan struct{}
+}
+
+// WindowExposeHandler 处理子窗 notify/request。
+type WindowExposeHandler func(payload any, session WindowExposeSession) (any, error)
 
 type windowCloseAttempt struct {
 	done   chan struct{}
@@ -92,6 +106,8 @@ func newWindowHandle(p *Runtime, id int64) *WindowHandle {
 		ID:       id,
 		runtime:  p,
 		handlers: make(map[string]map[uint64]func(map[string]any)),
+		exposed:  make(map[string]WindowExposeHandler),
+		inflight: make(map[string]chan struct{}),
 	}
 }
 
@@ -259,11 +275,152 @@ func (w *WindowHandle) IsClosed() bool {
 	return w.closed
 }
 
+// Expose 登记子窗可调用的方法。表跟窗走，不跟开窗 command 走。
+func (w *WindowHandle) Expose(handlers map[string]WindowExposeHandler) error {
+	w.exposeMu.Lock()
+	defer w.exposeMu.Unlock()
+	if w.exposed == nil {
+		w.exposed = make(map[string]WindowExposeHandler)
+	}
+	for name, handler := range handlers {
+		if len(name) >= 8 && name[:8] == "brickly:" {
+			return NewBppError("RESERVED_NAME", "不能 expose 保留名 "+name)
+		}
+		w.exposed[name] = handler
+	}
+	return nil
+}
+
+// Send 向子窗推送，不要求 parentRequestId。
+func (w *WindowHandle) Send(name string, payload any) error {
+	if len(name) >= 8 && name[:8] == "brickly:" {
+		return NewBppError("RESERVED_NAME", "不能推送保留名 "+name)
+	}
+	if w.IsClosed() {
+		return NewBppError("INVALID_INPUT", "window already closed")
+	}
+	return w.runtime.platformCall("ui.window.send", map[string]any{
+		"windowId": w.ID,
+		"name":     name,
+		"payload":  payload,
+	}, nil)
+}
+
+func (w *WindowHandle) dispatchChildRPC(event string, payload map[string]any) {
+	switch event {
+	case "notify":
+		name, _ := payload["name"].(string)
+		w.exposeMu.RLock()
+		handler := w.exposed[name]
+		w.exposeMu.RUnlock()
+		if handler == nil {
+			return
+		}
+		done := make(chan struct{})
+		close(done)
+		_, _ = handler(payload["payload"], WindowExposeSession{Emit: func(any) error { return nil }, Done: done})
+	case "request":
+		w.dispatchChildRequest(payload)
+	case "request.cancel":
+		requestID, _ := payload["requestId"].(string)
+		w.exposeMu.Lock()
+		if ch := w.inflight[requestID]; ch != nil {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
+			delete(w.inflight, requestID)
+		}
+		w.exposeMu.Unlock()
+	}
+}
+
+func (w *WindowHandle) dispatchChildRequest(payload map[string]any) {
+	name, _ := payload["name"].(string)
+	requestID, _ := payload["requestId"].(string)
+	if requestID == "" {
+		return
+	}
+	w.exposeMu.RLock()
+	handler := w.exposed[name]
+	w.exposeMu.RUnlock()
+	if handler == nil {
+		w.childReply(requestID, false, nil, "NOT_EXPOSED", "未 expose \""+name+"\"")
+		return
+	}
+	done := make(chan struct{})
+	w.exposeMu.Lock()
+	w.inflight[requestID] = done
+	w.exposeMu.Unlock()
+	go func() {
+		if w.runtime != nil {
+			w.runtime.trackEventRequest(requestID, func() {
+				select {
+				case <-done:
+				default:
+					close(done)
+				}
+			})
+		}
+		defer func() {
+			if w.runtime != nil {
+				w.runtime.untrackEventRequest(requestID)
+			}
+			w.exposeMu.Lock()
+			delete(w.inflight, requestID)
+			w.exposeMu.Unlock()
+		}()
+		result, err := handler(payload["payload"], WindowExposeSession{
+			Emit: func(event any) error {
+				return w.optionalPlatformCall("ui.window.emit", map[string]any{
+					"windowId":  w.ID,
+					"requestId": requestID,
+					"event":     event,
+				})
+			},
+			Done: done,
+		})
+		if err != nil {
+			code, message := "INTERNAL_ERROR", err.Error()
+			if bpp, ok := err.(*BppError); ok {
+				code, message = bpp.Code, bpp.Message
+			}
+			w.childReply(requestID, false, nil, code, message)
+			return
+		}
+		w.childReply(requestID, true, result, "", "")
+	}()
+}
+
+func (w *WindowHandle) childReply(requestID string, ok bool, result any, code, message string) {
+	reply := map[string]any{"ok": ok, "result": result}
+	if !ok {
+		reply["error"] = map[string]any{"code": code, "message": message}
+	}
+	w.exposeMu.Lock()
+	w.lastReply = map[string]any{"requestId": requestID, "reply": reply}
+	w.exposeMu.Unlock()
+	_ = w.optionalPlatformCall("ui.window.reply", map[string]any{
+		"windowId":  w.ID,
+		"requestId": requestID,
+		"ok":        ok,
+		"result":    result,
+		"error":     reply["error"],
+	})
+}
+
+func (w *WindowHandle) optionalPlatformCall(method string, input any) error {
+	if w.runtime == nil || w.runtime.grpcPlatform == nil {
+		return nil
+	}
+	return w.runtime.platformCall(method, input, nil)
+}
+
 // On 订阅窗口生命周期事件，返回取消订阅函数。
 //
-// event 取值（与 bpp.schema.json event.notify 下 window.* 事件后半段一致）：
-// closed / focus / blur / message / resize / move / minimize / maximize /
-// unmaximize / restore / show / hide / enter-full-screen / leave-full-screen。
+// event 取值与宿主线上主题后半段一致：
+// closed / focus / blur / resize / move / show / hide。
 func (w *WindowHandle) On(event string, fn func(payload map[string]any)) func() {
 	id := w.handlerSeq.Add(1)
 	w.mu.Lock()
@@ -342,6 +499,17 @@ func (w *WindowHandle) disposeLocal(terminalEvent string) []func(map[string]any)
 	}
 	w.handlers = make(map[string]map[uint64]func(map[string]any))
 	w.handlersMu.Unlock()
+	w.exposeMu.Lock()
+	w.exposed = make(map[string]WindowExposeHandler)
+	for _, ch := range w.inflight {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	w.inflight = make(map[string]chan struct{})
+	w.exposeMu.Unlock()
 	w.mu.Unlock()
 	return fns
 }

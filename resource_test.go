@@ -171,9 +171,9 @@ func TestEventsOnOnlyHydratesOuterResourceEnvelope(t *testing.T) {
 
 	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: mergeEventPayload(common, map[string]any{"encoding": "json", "resource": source})})
 	second := <-received
-	handle, ok := second.(*ResourceHandle)
-	if !ok || handle.Ref.ResourceID != ref.ResourceID {
-		t.Fatalf("outer resource envelope must become ResourceHandle, got %#v", second)
+	envelope, ok := second.(map[string]any)
+	if !ok || envelope["encoding"] != "json" {
+		t.Fatalf("event payload must stay a plain object, got %#v", second)
 	}
 }
 

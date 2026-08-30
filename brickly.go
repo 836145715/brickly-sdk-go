@@ -21,6 +21,8 @@ import (
 
 	"context"
 
+	"google.golang.org/grpc/metadata"
+
 	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
 )
 
@@ -71,6 +73,10 @@ type Runtime struct {
 	grpcHandle    *runtimegrpc.RuntimeHandle
 	grpcResources *runtimegrpc.HostResourceClient
 	grpcPlatform  *runtimegrpc.HostPlatformClient
+	currentRequestID atomic.Value
+
+	eventSubsMu sync.Mutex
+	eventSubs   map[string]func()
 }
 
 // New 创建并返回一个 Runtime 实例。不会连接 Host——那是 Start 的职责。
@@ -128,6 +134,7 @@ func (p *Runtime) Start() {
 		p.signalDone()
 		return
 	}
+	p.Config = ReadInjectedProfileConfig()
 	if err := p.startGRPC(); err != nil {
 		p.Error("grpc runtime start failed", err, nil)
 		p.signalDone()
@@ -140,6 +147,7 @@ func (p *Runtime) Start() {
 		_ = p.grpcResources.Close()
 		p.grpcResources = nil
 	}
+	p.clearEventSubs()
 	if p.grpcPlatform != nil {
 		_ = p.grpcPlatform.Close()
 		p.grpcPlatform = nil
@@ -164,7 +172,7 @@ func (p *Runtime) startGRPC() error {
 	}
 	p.mu.RUnlock()
 	options.Commands = commands
-	options.Invoke = func(commandID string, input *runtimegrpc.BrickValue) (*runtimegrpc.BrickValue, error) {
+	options.Invoke = func(commandID string, input *runtimegrpc.BrickValue, invocationID string) (*runtimegrpc.BrickValue, error) {
 		p.mu.RLock()
 		handler, ok := p.commandHandlers[commandID]
 		p.mu.RUnlock()
@@ -178,7 +186,10 @@ func (p *Runtime) startGRPC() error {
 		if convErr != nil {
 			return nil, convErr
 		}
-		ctx := newCommandContext(p, "grpc-"+commandID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
+		requestID := firstNonEmpty(invocationID, "grpc-"+commandID)
+		p.setCurrentRequestID(requestID)
+		defer p.setCurrentRequestID("")
+		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
 		result, invokeErr := handler(ctx, raw)
 		if invokeErr != nil {
 			return nil, invokeErr
@@ -200,7 +211,10 @@ func (p *Runtime) startGRPC() error {
 		if convErr != nil {
 			return nil, convErr
 		}
-		ctx := newCommandContext(p, "grpc-"+commandID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
+		requestID := "grpc-" + commandID
+		p.setCurrentRequestID(requestID)
+		defer p.setCurrentRequestID("")
+		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
 		ctx.stream = bindInteractStream(session.Send, session.Events())
 		go func() {
 			select {
@@ -223,6 +237,7 @@ func (p *Runtime) startGRPC() error {
 	p.mu.RLock()
 	fn := p.readyHandler
 	p.mu.RUnlock()
+	p.attachEventSubs()
 	if fn != nil {
 		go func() {
 			defer func() {
@@ -242,11 +257,85 @@ func (p *Runtime) platformCall(method string, input any, into any) error {
 	if p.grpcPlatform == nil {
 		return NewBppError("PROTOCOL_ERROR", "PlatformService 未连接；gRPC Runtime 是唯一路径")
 	}
-	result, err := p.grpcPlatform.PlatformCall(context.Background(), method, input)
+	ctx := context.Background()
+	if id := p.currentInvocationID(); id != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, runtimegrpc.InvocationIdMD, id)
+	}
+	result, err := p.grpcPlatform.PlatformCall(ctx, method, input)
 	if err != nil {
 		return err
 	}
 	return runtimegrpc.AssignJSON(result, into)
+}
+
+func (p *Runtime) attachEventSubs() {
+	for _, topic := range windowHostEventTopics {
+		p.ensureEventSub(topic)
+	}
+	p.Events.mu.RLock()
+	topics := make([]string, 0, len(p.Events.subs))
+	for topic := range p.Events.subs {
+		topics = append(topics, topic)
+	}
+	p.Events.mu.RUnlock()
+	for _, topic := range topics {
+		p.ensureEventSub(topic)
+	}
+}
+
+func (p *Runtime) ensureEventSub(topic string) {
+	if p.grpcPlatform == nil {
+		return
+	}
+	p.eventSubsMu.Lock()
+	defer p.eventSubsMu.Unlock()
+	if p.eventSubs == nil {
+		p.eventSubs = make(map[string]func())
+	}
+	if _, ok := p.eventSubs[topic]; ok {
+		return
+	}
+	p.eventSubs[topic] = p.grpcPlatform.Subscribe(topic, p.handleDomainEvent)
+}
+
+func (p *Runtime) dropEventSub(topic string) {
+	if strings.HasPrefix(topic, "window.") {
+		return
+	}
+	p.eventSubsMu.Lock()
+	defer p.eventSubsMu.Unlock()
+	cancel, ok := p.eventSubs[topic]
+	if !ok {
+		return
+	}
+	cancel()
+	delete(p.eventSubs, topic)
+}
+
+func (p *Runtime) clearEventSubs() {
+	p.eventSubsMu.Lock()
+	subs := p.eventSubs
+	p.eventSubs = nil
+	p.eventSubsMu.Unlock()
+	for _, cancel := range subs {
+		cancel()
+	}
+}
+
+func (p *Runtime) eventSubCount() int {
+	p.eventSubsMu.Lock()
+	defer p.eventSubsMu.Unlock()
+	return len(p.eventSubs)
+}
+
+func (p *Runtime) handleDomainEvent(topic string, payload any) {
+	raw := map[string]any{"event": topic, "payload": payload}
+	if fields, ok := payload.(map[string]any); ok {
+		if requestID, ok := fields["requestId"].(string); ok {
+			raw["requestId"] = requestID
+		}
+	}
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: raw})
 }
 
 func (p *Runtime) publishEvent(topic string, payload any) error {
@@ -274,17 +363,71 @@ func (p *Runtime) connectorInteract(ctx context.Context, brickID, commandID stri
 	return p.grpcPlatform.Interact(ctx, brickID, commandID, input, invocationID)
 }
 
-// Debug 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (p *Runtime) Debug(string, map[string]any) {}
+// Debug 经 Host PlatformService `diagnostics.log` 进入日志中心。
+func (p *Runtime) Debug(message string, fields map[string]any) {
+	p.emitBrickLog("debug", message, nil, fields, p.currentInvocationID())
+}
 
-// Info 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (p *Runtime) Info(string, map[string]any) {}
+// Info 经 Host PlatformService `diagnostics.log` 进入日志中心。
+func (p *Runtime) Info(message string, fields map[string]any) {
+	p.emitBrickLog("info", message, nil, fields, p.currentInvocationID())
+}
 
-// Warn 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (p *Runtime) Warn(string, map[string]any) {}
+// Warn 经 Host PlatformService `diagnostics.log` 进入日志中心。
+func (p *Runtime) Warn(message string, fields map[string]any) {
+	p.emitBrickLog("warn", message, nil, fields, p.currentInvocationID())
+}
 
-// Error 结构化日志入口（当前为 no-op，保留与 Node/Python API 对齐）。
-func (p *Runtime) Error(string, error, map[string]any) {}
+// Error 经 Host PlatformService `diagnostics.log` 进入日志中心。
+func (p *Runtime) Error(message string, err error, fields map[string]any) {
+	p.emitBrickLog("error", message, err, fields, p.currentInvocationID())
+}
+
+func (p *Runtime) setCurrentRequestID(id string) {
+	p.currentRequestID.Store(id)
+}
+
+func (p *Runtime) currentInvocationID() string {
+	id, _ := p.currentRequestID.Load().(string)
+	return id
+}
+
+func (p *Runtime) trackEventRequest(id string, cancel func()) {
+	if id == "" {
+		return
+	}
+	p.cancelMu.Lock()
+	p.cancelHandlers[id] = cancel
+	p.cancelMu.Unlock()
+	p.setCurrentRequestID(id)
+}
+
+func (p *Runtime) untrackEventRequest(id string) {
+	if id == "" {
+		return
+	}
+	p.cancelMu.Lock()
+	delete(p.cancelHandlers, id)
+	p.cancelMu.Unlock()
+}
+
+func (p *Runtime) emitBrickLog(level, message string, err error, fields map[string]any, invocationID string) {
+	if p.grpcPlatform == nil {
+		return
+	}
+	payload := map[string]any{
+		"level":        level,
+		"message":      message,
+		"fields":       fields,
+		"invocationId": invocationID,
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	go func() {
+		_, _ = p.grpcPlatform.PlatformCall(context.Background(), "diagnostics.log", payload)
+	}()
+}
 
 // eventNotify 是 EventBus 本地投递签名，不是线上协议帧。
 type rawMessage struct {
@@ -312,22 +455,20 @@ func (p *Runtime) handleEventNotify(msg rawMessage) {
 				handle := p.windows[wid]
 				p.windowsMu.RUnlock()
 				if handle != nil {
-					handle.emit(strings.TrimPrefix(event, "window."), m)
+					name := strings.TrimPrefix(event, "window.")
+					if name == "notify" || name == "request" || name == "request.cancel" {
+						handle.dispatchChildRPC(name, m)
+					} else {
+						handle.emit(name, m)
+					}
 				}
 			}
 		}
 	}
 
-	p.Events.dispatch(event, unwrapEventResource(payloadRaw), msg.Raw)
-}
-
-func unwrapEventResource(value any) any {
-	if envelope, ok := value.(map[string]any); ok && envelope["encoding"] == "json" {
-		if resource, ok := hydrateResourceValue(envelope["resource"], 0).(*ResourceHandle); ok {
-			return resource
-		}
+	if !strings.HasPrefix(event, "window.") {
+		p.Events.dispatch(event, payloadRaw, msg.Raw)
 	}
-	return value
 }
 
 func (p *Runtime) signalDone() {
@@ -372,3 +513,11 @@ func (p *Runtime) rememberTerminalWindowEvent(eventID string) bool {
 	return true
 }
 
+// —— 小工具 ——
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}

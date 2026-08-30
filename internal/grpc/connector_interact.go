@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/metadata"
 )
@@ -126,6 +127,38 @@ func (s *ConnectorInteraction) Request(ctx context.Context, request any) (any, e
 		return nil, ctx.Err()
 	case outcome := <-reply:
 		return outcome.result, outcome.err
+	}
+}
+
+func (s *ConnectorInteraction) End(ctx context.Context, timeoutMs ...int) (any, error) {
+	if err := s.CloseInput(ctx); err != nil {
+		s.Cancel("end-failed")
+		return nil, err
+	}
+	if len(timeoutMs) == 0 {
+		return s.Result()
+	}
+	timeout := time.Duration(timeoutMs[0]) * time.Millisecond
+	done := make(chan struct{})
+	var result any
+	var err error
+	go func() {
+		result, err = s.Result()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return result, err
+	case <-timer.C:
+		s.Cancel("DEADLINE_EXCEEDED")
+		<-done
+		return nil, fmt.Errorf("DEADLINE_EXCEEDED: end 等待超时")
+	case <-ctx.Done():
+		s.Cancel(ctx.Err().Error())
+		<-done
+		return nil, ctx.Err()
 	}
 }
 

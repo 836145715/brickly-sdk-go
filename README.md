@@ -21,22 +21,14 @@ func main() {
     p := brickly.New()
 
     p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
-        _ = ctx.Send(map[string]any{"type": "hello"})
-        return map[string]any{"ok": true, "echo": string(input)}, nil
-    })
-
-    p.OnReady(func() error {
-        win, err := p.UI.CreateBrowserWindow("ui/pet.html", brickly.WindowOptions{
-            "width": 200, "height": 200,
-            "frame": false, "transparent": true, "alwaysOnTop": true,
-        })
-        if err != nil {
-            return err
+        data := map[string]any{}
+        _ = json.Unmarshal(input, &data)
+        name, _ := data["name"].(string)
+        if name == "" {
+            name = "Brickly"
         }
-        win.On("closed", func(_ map[string]any) {
-            _ = p.Events.Publish("pet.closed", map[string]any{"id": win.ID})
-        })
-        return nil
+        ctx.Info("hello", map[string]any{"name": name})
+        return map[string]any{"message": "Hello, " + name}, nil
     })
 
     p.Start() // 连接 Host gRPC endpoint，阻塞直到关闭
@@ -50,6 +42,25 @@ SDK 自动完成：
 - Host 平台 / UI / Resource 客户端路由
 - `context.Context` 取消信号
 - `OnShutdown` 钩子
+
+### 进阶：双向 `live`
+
+`ctx.Send` 只在 `interact` 里有意义，不要写进 `hello`。页面用 `interact`，不要用 `call`。
+
+```go
+p.OnCommand("live", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
+    n := 0
+    _ = ctx.OnEvent(func(event any) {
+        _ = ctx.Send(map[string]any{"type": "reply", "text": "收到"})
+    })
+    <-ctx.Closed()
+    return map[string]any{"n": n}, nil
+})
+```
+
+### 进阶：两种子窗
+
+`attached`（默认）随这次调用 / runtime 消失。`standalone` 窗在则 runtime 在，调用方要先 `Start(allowStandaloneWindows)`，建窗写 `"lifetime": "standalone"`。不要把「附加」理解成常驻。
 
 长期占用使用 `ToolSdk.Start` 与 `ToolHandle.Dispose`/`Stop`。`Close` 是无 force 参数的 `Dispose` 别名。`Owner` context 只等价于 `Dispose`，不会 `Stop`。子窗口默认 attached。
 
@@ -66,14 +77,14 @@ SDK 自动完成：
 | `OnShutdown(fn)`                                   | Host 关闭 Runtime 时触发                                                   |
 | `UI.CreateBrowserWindow(url, opts)`                | 创建子窗口，返回 `*WindowHandle`                                           |
 | `UI.ListWindows()`                                 | 列出本 Brick 持有的窗口                                                    |
-| `Events.On(event, fn)`                             | 订阅事件总线（含 `window.*` 系列），返回取消函数                           |
+| `Events.On(event, fn)`                             | 订阅公共事件（`命名空间:主题`），返回取消函数；窗口寿命用 `WindowHandle.On` |
 | `Events.Publish(event, payload)`                   | 发布事件                                                                   |
 | `Platform.System.*` / `System.*`                   | 调用宿主系统能力（System 是便捷别名）                                      |
 | `Platform.Clipboard.*`                             | 读取或写入系统剪贴板                                                       |
 | `Dependencies.Require(alias)`                      | 获取 Host 握手绑定到精确 `BrickRef` 的依赖客户端                           |
 | `OpenResource(ref)`                                | 惰性绑定已有 `ResourceRef`，不立即访问 Host                                |
 | `Start()`                                          | 连接 Host gRPC（阻塞）                                                     |
-| `Debug/Info/Warn/Error(message, fields)`           | 结构化日志入口（当前为本地 no-op，保留 API）                               |
+| `Debug/Info/Warn/Error(message, fields)`           | 经 Host `diagnostics.log` 进入日志中心；平台未连接时 no-op                  |
 
 ### `CommandContext`（handler 第一个参数）
 
@@ -83,7 +94,7 @@ SDK 自动完成：
 | `Invocation`                                         | 宿主注入的可信调用来源；未提供时 `Source` 为 `unknown`                                                                   |
 | `Send(event)`                                        | 推给调用方（仅 interact）                                                                                                |
 | `OnEvent(handler)`                                   | 收调用方 send（仅 interact）                                                                                             |
-| `Closed()`                                           | 等到调用方 closeInput / 断开                                                                                             |
+| `Closed()`                                           | 等到调用方 end / 断开                                                                                                    |
 | `Context()`                                          | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
 | `IsCancelled()`                                      | 协作式取消轮询                                                                                                           |
 | `CreateResource(content, options)`                   | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                                |
@@ -102,7 +113,7 @@ Go command handler 接收 `json.RawMessage`。输入包含资源时，先把对�
 
 Brick 可通过 `runtime.CreateResource(content, options)` 主动创建资源；`content` 只接受
 `string` 或 `[]byte`。字符串默认 `text/plain; charset=utf-8`，字节默认
-`application/octet-stream`，通常可传 `nil` options。该能力无需声明 manifest 权限，但仍受 Host
+`application/octet-stream`，通常可传 `nil` options。资源创建仍受 Host
 配额与生命周期治理。`CreateResource` 走 Host `ResourceService.Create`。
 
 流式入口使用 `runtime.CreateResourceFrom(reader, options)`：先把 reader 读入内存，再走同一条
@@ -110,11 +121,10 @@ Create 路径，上限 200 MiB。`CreateResourceWriter` 目前尚未接通 Resou
 
 普通 `Invoke` / `InvokeRoot` 始终解码为直接值，逻辑 JSON 输入和结果上限为 10 MiB，一次传完；
 超限返回 `PAYLOAD_TOO_LARGE`，不会静默改成资源类型。大结果由作者 `CreateResource`
-后返回 Handle；调用方看到 `ResourceRef`，再 `OpenResource`。EventBus 回调统一收到
-外层 `*ResourceHandle`，先调用 `JSON(&payload)` 取得业务对象。资源内容按普通 JSON
-解析，内嵌 `ResourceRef` 不会自动水合，需要读取时应显式转换。Capability token 不得写入
-日志或持久化，Ref 只能在同一宿主和 TTL 内使用。无论事件大小，回调都不会收到内联对象或
-内部 `{"resource": ..., "encoding": "json"}` 包装；消费完成后应调用 `Close()`。
+后返回 Handle；调用方看到 `ResourceRef`，再 `OpenResource`。EventBus 回调收到的就是
+发布时的业务对象，不会再包一层资源，也不会水合成 `*ResourceHandle`。若业务对象里本身带
+`ResourceRef`，需要读内容时再 `OpenResource`。Capability token 不得写入日志或持久化，
+Ref 只能在同一宿主和 TTL 内使用。
 
 SDK 在发送 invoke、stream、command 结果、chunk、output 或事件时，会自动把嵌套
 `*ResourceHandle` 转成完整 `ResourceRef`。`OpenResource` 只做校验并绑定句柄，不会立即访问 Host：
@@ -149,7 +159,7 @@ p.Error("failed", err, nil)
 ctx.Info("search started", map[string]any{"pattern": q})
 ```
 
-业务日志走 `Info` / `Warn` / `Error`，不要写裸 stderr。
+业务日志走 `Info` / `Warn` / `Error`，不要写裸 stderr。命令 handler 内会带上当前 `RequestID` 挂到该 command 节点；`OnReady` 等无当前 command 时走顶级 diagnostic。handler 返回后的异步日志请继续用 `Runtime.Info`（此时可能挂不上原 command）。
 
 ---
 
@@ -168,10 +178,9 @@ err = openAI.Invoke(
     brickly.WithProfileID("work"),
 )
 
-session, err := openAI.Interact(ctx.Context(), "complete", map[string]any{"prompt": "写一首诗"})
-if err != nil { return nil, err }
-if err := session.CloseInput(ctx.Context()); err != nil { return nil, err }
-poem, err := session.Result()
+poem, err := brickly.Call(ctx.Context(), openAI, "complete", map[string]any{"prompt": "写一首诗"}, brickly.CallOptions{
+    OnEvent: func(event any) { _ = event },
+})
 ```
 
 调用方 manifest 必须在 `dependencies` 中声明目标 Brick 和允许调用的命令：
@@ -203,31 +212,23 @@ err = openAI.InvokeRoot(
 )
 ```
 
-### 流式跨 Brick 调用
+### 过程跨 Brick 调用
 
-目标命令会推事件时，在 command handler 里 `Interact`，收 `Events()`，再 `Result()`。
+目标命令会推事件时，在 command handler 里 `Call`，传入 `OnEvent`。
 
 ```go
 openAI, err := ctx.Dependencies().Require("openai")
 if err != nil { return nil, err }
-session, err := openAI.Interact(ctx.Context(), "chat-completions", map[string]any{
+return brickly.Call(ctx.Context(), openAI, "chat-completions", map[string]any{
     "stream": true, "messages": messages,
+}, brickly.CallOptions{
+    OnEvent: func(event any) { _ = ctx.Send(event) },
 })
-if err != nil { return nil, err }
-for event := range session.Events() {
-    if err := ctx.Send(event); err != nil {
-        return nil, err
-    }
-}
-if err := session.CloseInput(ctx.Context()); err != nil {
-    return nil, err
-}
-return session.Result()
 ```
 
 ## 跨 Brick 会话
 
-有状态交互就是 `Interact`，不要另做 `Open()`。
+有状态交互就是 `Interact`，不要另做 `Open()`。收过程只走 `OnEvent`，说完用 `End`。
 
 ```go
 openAI, err := ctx.Dependencies().Require("openai")
@@ -236,15 +237,8 @@ session, err := openAI.Interact(ctx.Context(), "chat", map[string]any{
     "prompt": "继续刚才的话题",
 })
 if err != nil { return nil, err }
-for event := range session.Events() {
-    if err := ctx.Send(event); err != nil {
-        return nil, err
-    }
-}
-if err := session.CloseInput(ctx.Context()); err != nil {
-    return nil, err
-}
-return session.Result()
+_, err = session.End(ctx.Context())
+return nil, err
 ```
 
 `WithProfileID` 指定的是目标 Brick Profile ID。不传则使用目标 Brick 默认 Profile，或使用热键调用上下文中的依赖 Profile 选择。`Invoke` / `Interact` 都会按调用方 manifest 的 `dependencies[target].commands` 重新校验命令。
@@ -284,11 +278,11 @@ p.OnCommand("show-app-info", func(ctx *brickly.CommandContext, _ json.RawMessage
 
 当前方法包括 `ShowNotification`、`ShellOpenPath`、`ShellTrashItem`、`ShellShowItemInFolder`、`ShellOpenExternal`、`ShellBeep`、`GetNativeID`、`GetAppName`、`GetAppVersion`、`GetPath`、`GetFileIcon`、`ReadCurrentFolderPath`、`ReadCurrentBrowserURL`、`IsDev`、`IsMacOS`、`IsWindows`、`IsLinux`。
 
-`GetPath()` 支持 `SystemPathHome`、`SystemPathAppData`、`SystemPathAssets`、`SystemPathUserData`、`SystemPathSessionData`、`SystemPathTemp`、`SystemPathExe`、`SystemPathModule`、`SystemPathDesktop`、`SystemPathDocuments`、`SystemPathDownloads`、`SystemPathMusic`、`SystemPathPictures`、`SystemPathVideos`、`SystemPathRecent`、`SystemPathLogs`、`SystemPathCrashDumps`。runtime 侧仍按 manifest 权限校验：通知需要 `os.notification`；Shell 类能力需要 `os.exec`；应用信息、路径、设备 ID、平台判断和当前文件夹路径读取需要 `os.env`；文件图标需要 `fs.read`。`ReadCurrentFolderPath()` 在 macOS Finder 与 Windows Explorer 前台窗口可用；当前没有可读取的前台文件管理器文件夹时会返回 `CURRENT_FOLDER_UNAVAILABLE`。`ReadCurrentBrowserURL()` 当前预留，会返回 `UNSUPPORTED_PLATFORM`。
+`GetPath()` 支持 `SystemPathHome`、`SystemPathAppData`、`SystemPathAssets`、`SystemPathUserData`、`SystemPathSessionData`、`SystemPathTemp`、`SystemPathExe`、`SystemPathModule`、`SystemPathDesktop`、`SystemPathDocuments`、`SystemPathDownloads`、`SystemPathMusic`、`SystemPathPictures`、`SystemPathVideos`、`SystemPathRecent`、`SystemPathLogs`、`SystemPathCrashDumps`。`ReadCurrentFolderPath()` 在 macOS Finder 与 Windows Explorer 前台窗口可用；当前没有可读取的前台文件管理器文件夹时会返回 `CURRENT_FOLDER_UNAVAILABLE`。`ReadCurrentBrowserURL()` 当前预留，会返回 `UNSUPPORTED_PLATFORM`。`ShellOpenExternal` 仅允许 `http` / `https` / `mailto`。
 
 ## 平台 Clipboard API
 
-`p.Platform.Clipboard.*` 与 handler 内的 `ctx.Platform().Clipboard.*` 通过 Host `PlatformService` 调用宿主剪贴板能力。runtime 侧仍按 manifest 权限校验，调用方需要声明 `os.clipboard`。
+`p.Platform.Clipboard.*` 与 handler 内的 `ctx.Platform().Clipboard.*` 通过 Host `PlatformService` 调用宿主剪贴板能力。
 
 ```go
 snapshot, err := ctx.Platform().Clipboard.ReadContent()
@@ -332,7 +326,7 @@ if err != nil {
 return map[string]any{"region": region, "display": display}, nil
 ```
 
-`Screenshot` 与 `Screen` 能力需要 `os.screenshot` 权限；截图传入自定义 `outputPath` 时还需要 `fs.write`。`Input` 能力需要 `os.input`，会影响当前前台应用，应仅在用户明确触发时调用。权限拒绝及其他宿主错误会以 `BppError` 原样返回。
+截图传入自定义 `outputPath` 时父目录必须已存在且可写。`Input` 会影响当前前台应用，应仅在用户明确触发时调用。宿主错误会以 `BppError` 原样返回。
 
 ---
 
@@ -490,7 +484,13 @@ unsub := win.On("closed", func(payload map[string]any) {
     fmt.Println("window closed:", payload["windowId"])
 })
 defer unsub()
-// 其他事件：focus / blur / message / resize / move / minimize / maximize /
+_ = win.Expose(map[string]brickly.WindowExposeHandler{
+    "pause": func(_ any, _ brickly.WindowExposeSession) (any, error) {
+        return nil, nil
+    },
+})
+_ = win.Send("tick", map[string]any{"remaining": 60})
+// 其他原生窗事件：focus / blur / resize / move / minimize / maximize /
 // unmaximize / restore / show / hide / enter-full-screen / leave-full-screen
 ```
 
@@ -607,7 +607,7 @@ replace github.com/836145715/brickly-sdk-go => ../../../../packages/brickly-sdk-
 
 | Node SDK                                | Go SDK                                       |
 | --------------------------------------- | -------------------------------------------- |
-| `new BricklyRuntime({ brickId })`       | `brickly.New()` |
+| `new BricklyRuntime()`                  | `brickly.New()` |
 | `brick.onCommand(id, fn)`               | `p.OnCommand(id, fn)`                        |
 | `ctx.send(event)`                       | `ctx.Send(event)`                            |
 | `ctx.ui.createBrowserWindow(url, opts)` | `ctx.UI().CreateBrowserWindow(url, opts)`    |

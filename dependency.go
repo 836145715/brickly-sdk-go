@@ -124,18 +124,26 @@ func (d *DependencyClient) Alias() string { return d.alias }
 // Ref 返回 Host 绑定的精确目标副本。
 func (d *DependencyClient) Ref() BrickRef { return d.ref }
 
+func (d *DependencyClient) parentID() string {
+	if d.parentRequestID != "" {
+		return d.parentRequestID
+	}
+	return d.runtime.currentInvocationID()
+}
+
 func (d *DependencyClient) invokeOptions(opts []InvokeOption) invokeOptions {
 	options := collectInvokeOptions(opts)
 	if options.profileID == "" {
 		options.profileID = d.dependencyProfiles[BrickKeyOf(d.ref)]
 	}
-	options.parentRequestID = d.parentRequestID
+	options.parentRequestID = d.parentID()
 	options.trace = d.trace
 	return options
 }
 
 func (d *DependencyClient) requireActiveCommand(operation string) error {
-	if d.parentRequestID == "" || !d.runtime.isCommandActive(d.parentRequestID) {
+	parent := d.parentID()
+	if parent == "" || !d.runtime.isCommandActive(parent) {
 		return parentInvocationRequired(operation + " must run inside an active command handler")
 	}
 	return nil
@@ -146,7 +154,7 @@ func (d *DependencyClient) Interact(ctx context.Context, commandID string, input
 	if err := d.requireActiveCommand("Interact"); err != nil {
 		return nil, err
 	}
-	return d.runtime.connectorInteract(ctx, d.ref.BrickID, commandID, input, d.parentRequestID)
+	return d.runtime.connectorInteract(ctx, d.ref.BrickID, commandID, input, d.parentID())
 }
 
 // Invoke 发起 child invocation。

@@ -1,67 +1,105 @@
 package brickly
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // Interaction 是 interact 返回的领域会话。调用方不接触 gRPC 类型。
 type Interaction interface {
 	Send(ctx context.Context, event any) error
 	SendLatest(ctx context.Context, key string, event any) error
 	Request(ctx context.Context, request any) (any, error)
-	CloseInput(ctx context.Context) error
+	End(ctx context.Context, timeoutMs ...int) (any, error)
 	Cancel(reason string)
+}
+
+// interactionTransport 是实现层半关闭与收事件的内部面，不出现在公开文档。
+type interactionTransport interface {
+	Interaction
+	CloseInput(ctx context.Context) error
 	Events() <-chan any
 	Result() (any, error)
 }
 
-// BrickClient 只暴露 invoke / interact 两种协议形态。Call / Stream 是糖。
+// BrickClient 只暴露 invoke / interact 两种协议形态。Call 是糖。
 type BrickClient interface {
 	Invoke(ctx context.Context, command string, input any) (any, error)
 	Interact(ctx context.Context, command string, input any) (Interaction, error)
 }
 
-// CallOptions 是 Call 的可选参数。OnEvent 的返回值不是回复。
+// CallOptions 是 Call 的可选参数。OnEvent 必须传入；返回值不是回复。
 type CallOptions struct {
-	OnEvent func(event any)
+	OnEvent   func(event any)
+	TimeoutMs *int
 }
 
-// Call 是单次阻塞糖：没有 OnEvent 走 Invoke；有则 Interact + CloseInput + 收事件 + Result。
+// Call 是单次开场糖：Interact + 立刻 End。必须与命令 mode=call 对齐。
 func Call(ctx context.Context, client BrickClient, command string, input any, opts ...CallOptions) (any, error) {
-	var onEvent func(any)
+	var options CallOptions
 	if len(opts) > 0 {
-		onEvent = opts[0].OnEvent
+		options = opts[0]
 	}
-	if onEvent == nil {
-		return client.Invoke(ctx, command, input)
+	if options.OnEvent == nil {
+		return nil, fmt.Errorf("INVALID_ARGUMENT: call 必须传入 OnEvent")
 	}
 	session, err := client.Interact(ctx, command, input)
 	if err != nil {
 		return nil, err
+	}
+	transport, ok := session.(interactionTransport)
+	if !ok {
+		if options.TimeoutMs != nil {
+			return session.End(ctx, *options.TimeoutMs)
+		}
+		return session.End(ctx)
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for event := range session.Events() {
-			onEvent(event)
+		for event := range transport.Events() {
+			options.OnEvent(event)
 		}
 	}()
-	if err := session.CloseInput(ctx); err != nil {
-		session.Cancel("call-close-failed")
+	if options.TimeoutMs != nil {
+		result, endErr := session.End(ctx, *options.TimeoutMs)
 		<-done
-		return nil, err
+		return result, endErr
 	}
-	result, err := session.Result()
+	result, endErr := session.End(ctx)
 	<-done
-	return result, err
+	return result, endErr
 }
 
-// Stream 是 interact + CloseInput 的便利封装，不是第三种协议。
-func Stream(ctx context.Context, client BrickClient, command string, input any) (<-chan any, error) {
-	session, err := client.Interact(ctx, command, input)
-	if err != nil {
-		return nil, err
-	}
+func endInteraction(ctx context.Context, session interactionTransport, timeoutMs ...int) (any, error) {
 	if err := session.CloseInput(ctx); err != nil {
+		session.Cancel("call-end-failed")
 		return nil, err
 	}
-	return session.Events(), nil
+	if len(timeoutMs) == 0 {
+		return session.Result()
+	}
+	timeout := time.Duration(timeoutMs[0]) * time.Millisecond
+	done := make(chan struct{})
+	var result any
+	var err error
+	go func() {
+		result, err = session.Result()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return result, err
+	case <-timer.C:
+		session.Cancel("DEADLINE_EXCEEDED")
+		<-done
+		return nil, fmt.Errorf("DEADLINE_EXCEEDED: end 等待超时")
+	case <-ctx.Done():
+		session.Cancel(ctx.Err().Error())
+		<-done
+		return nil, ctx.Err()
+	}
 }

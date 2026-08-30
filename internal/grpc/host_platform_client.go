@@ -76,6 +76,32 @@ func (c *HostPlatformClient) PlatformCall(ctx context.Context, method string, in
 	return brickValueToAny(response.GetResult()), nil
 }
 
+func (c *HostPlatformClient) Subscribe(topic string, onEvent func(topic string, payload any)) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := c.events.Subscribe(c.withToken(ctx), &SubscribeEventsRequest{Topic: topic})
+	if err != nil {
+		cancel()
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			event, recvErr := stream.Recv()
+			if recvErr != nil {
+				return
+			}
+			if onEvent != nil {
+				onEvent(event.GetTopic(), brickValueToAny(event.GetPayload()))
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func (c *HostPlatformClient) Publish(ctx context.Context, topic string, payload any) error {
 	normalized, err := jsonInput(payload)
 	if err != nil {
