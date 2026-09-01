@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PlatformService_Call_FullMethodName = "/brickly.runtime.v1.PlatformService/Call"
+	PlatformService_Call_FullMethodName     = "/brickly.runtime.v1.PlatformService/Call"
+	PlatformService_Interact_FullMethodName = "/brickly.runtime.v1.PlatformService/Interact"
 )
 
 // PlatformServiceClient is the client API for PlatformService service.
@@ -27,8 +28,10 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // PlatformService 承接原 host.platform.* 能力，使用 BrickValue 而不是 BPP/Base64。
+// Interact 复用 Command 的 ClientFrame / ServerFrame，打已有占用上自己的命令。
 type PlatformServiceClient interface {
 	Call(ctx context.Context, in *PlatformCallRequest, opts ...grpc.CallOption) (*PlatformCallResponse, error)
+	Interact(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ClientFrame, ServerFrame], error)
 }
 
 type platformServiceClient struct {
@@ -49,13 +52,28 @@ func (c *platformServiceClient) Call(ctx context.Context, in *PlatformCallReques
 	return out, nil
 }
 
+func (c *platformServiceClient) Interact(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ClientFrame, ServerFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &PlatformService_ServiceDesc.Streams[0], PlatformService_Interact_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ClientFrame, ServerFrame]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PlatformService_InteractClient = grpc.BidiStreamingClient[ClientFrame, ServerFrame]
+
 // PlatformServiceServer is the server API for PlatformService service.
 // All implementations must embed UnimplementedPlatformServiceServer
 // for forward compatibility.
 //
 // PlatformService 承接原 host.platform.* 能力，使用 BrickValue 而不是 BPP/Base64。
+// Interact 复用 Command 的 ClientFrame / ServerFrame，打已有占用上自己的命令。
 type PlatformServiceServer interface {
 	Call(context.Context, *PlatformCallRequest) (*PlatformCallResponse, error)
+	Interact(grpc.BidiStreamingServer[ClientFrame, ServerFrame]) error
 	mustEmbedUnimplementedPlatformServiceServer()
 }
 
@@ -68,6 +86,9 @@ type UnimplementedPlatformServiceServer struct{}
 
 func (UnimplementedPlatformServiceServer) Call(context.Context, *PlatformCallRequest) (*PlatformCallResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Call not implemented")
+}
+func (UnimplementedPlatformServiceServer) Interact(grpc.BidiStreamingServer[ClientFrame, ServerFrame]) error {
+	return status.Errorf(codes.Unimplemented, "method Interact not implemented")
 }
 func (UnimplementedPlatformServiceServer) mustEmbedUnimplementedPlatformServiceServer() {}
 func (UnimplementedPlatformServiceServer) testEmbeddedByValue()                         {}
@@ -108,6 +129,13 @@ func _PlatformService_Call_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PlatformService_Interact_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(PlatformServiceServer).Interact(&grpc.GenericServerStream[ClientFrame, ServerFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PlatformService_InteractServer = grpc.BidiStreamingServer[ClientFrame, ServerFrame]
+
 // PlatformService_ServiceDesc is the grpc.ServiceDesc for PlatformService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -120,6 +148,13 @@ var PlatformService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _PlatformService_Call_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Interact",
+			Handler:       _PlatformService_Interact_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "platform.proto",
 }

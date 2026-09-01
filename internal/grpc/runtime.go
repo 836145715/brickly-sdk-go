@@ -23,6 +23,7 @@ const (
 	HostTokenMD      = "x-brickly-host-token"
 	InvocationIdMD   = "x-brickly-invocation-id"
 	TargetBrickIdMD  = "x-brickly-target-brick-id"
+	HandleIdMD       = "x-brickly-handle-id"
 	HostEndpointEnv  = "BRICKLY_HOST_ENDPOINT"
 	BootstrapEnv     = "BRICKLY_BOOTSTRAP_TOKEN"
 	RuntimeToHostEnv = "BRICKLY_RUNTIME_TO_HOST_TOKEN"
@@ -45,7 +46,7 @@ type StartOptions struct {
 	RuntimeToHostToken string
 	HostToRuntimeToken string
 	Commands           []string
-	Invoke             func(commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
+	Invoke             func(ctx context.Context, commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
 	Interact           func(commandID string, session InteractSession) (any, error)
 }
 
@@ -80,13 +81,13 @@ func TakeRuntimeEnv() (StartOptions, error) {
 type commandServer struct {
 	UnimplementedBrickCommandServiceServer
 	hostToken string
-	invoke    func(commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
+	invoke    func(ctx context.Context, commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
 	interact  func(commandID string, session InteractSession) (any, error)
 }
 
 func (s *commandServer) Invoke(ctx context.Context, request *InvokeRequest) (*InvokeResult, error) {
 	if s.invoke != nil {
-		result, err := s.invoke(request.GetCommandId(), request.GetInput(), incomingMetadataValue(ctx, InvocationIdMD))
+		result, err := s.invoke(ctx, request.GetCommandId(), request.GetInput(), incomingMetadataValue(ctx, InvocationIdMD))
 		if err != nil {
 			return nil, StatusFromError(err)
 		}

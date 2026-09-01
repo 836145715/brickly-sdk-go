@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.8.0
+
+### Features
+
+- 新增本机持久存储：`ctx.Storage` / Runtime `Storage`（KV、Collection、Secrets）。按 origin + brickId 隔离。
+
 ## 0.7.0
 
 ### Breaking

@@ -49,6 +49,7 @@ type Runtime struct {
 	Platform     *PlatformAPI
 	System       *SystemAPI
 	Dependencies *DependencyRegistry
+	Storage      *StorageAPI
 	Config       map[string]any
 
 	mu              sync.RWMutex
@@ -73,7 +74,10 @@ type Runtime struct {
 	grpcHandle    *runtimegrpc.RuntimeHandle
 	grpcResources *runtimegrpc.HostResourceClient
 	grpcPlatform  *runtimegrpc.HostPlatformClient
+	grpcStorage   *runtimegrpc.HostBrickStorageClient
 	currentRequestID atomic.Value
+	currentCommandCtx atomic.Value
+	inCommand        atomic.Bool
 
 	eventSubsMu sync.Mutex
 	eventSubs   map[string]func()
@@ -94,6 +98,7 @@ func New() *Runtime {
 	p.Platform = newPlatformAPI(p, nil)
 	p.System = p.Platform.System
 	p.Dependencies = newDependencyRegistry(p)
+	p.Storage = newStorageAPI(p)
 	p.Config = map[string]any{}
 	return p
 }
@@ -152,6 +157,10 @@ func (p *Runtime) Start() {
 		_ = p.grpcPlatform.Close()
 		p.grpcPlatform = nil
 	}
+	if p.grpcStorage != nil {
+		_ = p.grpcStorage.Close()
+		p.grpcStorage = nil
+	}
 }
 
 func (p *Runtime) startGRPC() error {
@@ -165,6 +174,9 @@ func (p *Runtime) startGRPC() error {
 	if platform, platformErr := runtimegrpc.NewHostPlatformClient(options.HostEndpoint, options.RuntimeToHostToken); platformErr == nil {
 		p.grpcPlatform = platform
 	}
+	if storage, storageErr := runtimegrpc.NewHostBrickStorageClient(options.HostEndpoint, options.RuntimeToHostToken); storageErr == nil {
+		p.grpcStorage = storage
+	}
 	p.mu.RLock()
 	commands := make([]string, 0, len(p.commandHandlers))
 	for commandID := range p.commandHandlers {
@@ -172,7 +184,7 @@ func (p *Runtime) startGRPC() error {
 	}
 	p.mu.RUnlock()
 	options.Commands = commands
-	options.Invoke = func(commandID string, input *runtimegrpc.BrickValue, invocationID string) (*runtimegrpc.BrickValue, error) {
+	options.Invoke = func(rpcCtx context.Context, commandID string, input *runtimegrpc.BrickValue, invocationID string) (*runtimegrpc.BrickValue, error) {
 		p.mu.RLock()
 		handler, ok := p.commandHandlers[commandID]
 		p.mu.RUnlock()
@@ -187,9 +199,9 @@ func (p *Runtime) startGRPC() error {
 			return nil, convErr
 		}
 		requestID := firstNonEmpty(invocationID, "grpc-"+commandID)
-		p.setCurrentRequestID(requestID)
-		defer p.setCurrentRequestID("")
-		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
+		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil, rpcCtx)
+		p.enterCommand(requestID, ctx.Context())
+		defer p.leaveCommand()
 		result, invokeErr := handler(ctx, raw)
 		if invokeErr != nil {
 			return nil, invokeErr
@@ -211,18 +223,11 @@ func (p *Runtime) startGRPC() error {
 		if convErr != nil {
 			return nil, convErr
 		}
-		requestID := "grpc-" + commandID
-		p.setCurrentRequestID(requestID)
-		defer p.setCurrentRequestID("")
-		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil)
+		requestID := firstNonEmpty(invocationIDFromContext(session.Context()), "grpc-"+commandID)
+		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil, session.Context())
+		p.enterCommand(requestID, ctx.Context())
+		defer p.leaveCommand()
 		ctx.stream = bindInteractStream(session.Send, session.Events())
-		go func() {
-			select {
-			case <-session.Context().Done():
-				ctx.cancel()
-			case <-ctx.Context().Done():
-			}
-		}()
 		result, interactErr := handler(ctx, raw)
 		if interactErr != nil {
 			return nil, interactErr
@@ -251,6 +256,41 @@ func (p *Runtime) startGRPC() error {
 		}()
 	}
 	return nil
+}
+
+// Invoke 再跑自己的一条命令。已有占用则不 Dispose。没有当前命令时是 root。
+func (p *Runtime) Invoke(commandID string, input any) (any, error) {
+	var out any
+	if err := p.platformCall("runtime.invoke", map[string]any{
+		"commandId": commandID,
+		"input":     input,
+	}, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Interact 已有占用上再开会话，不 Dispose。没有占用则拒绝。
+func (p *Runtime) Interact(ctx context.Context, commandID string, input any) (Interaction, error) {
+	if p.grpcPlatform == nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "PlatformService 未连接；gRPC Runtime 是唯一路径")
+	}
+	return p.grpcPlatform.PlatformInteract(p.outboundContext(ctx), commandID, input, p.currentInvocationID())
+}
+
+// Call 是 interact + 半关闭的糖。必须与命令 mode=call 对齐。
+func (p *Runtime) Call(ctx context.Context, commandID string, input any, opts ...CallOptions) (any, error) {
+	return Call(ctx, runtimeSelfClient{p}, commandID, input, opts...)
+}
+
+type runtimeSelfClient struct{ runtime *Runtime }
+
+func (c runtimeSelfClient) Invoke(_ context.Context, command string, input any) (any, error) {
+	return c.runtime.Invoke(command, input)
+}
+
+func (c runtimeSelfClient) Interact(ctx context.Context, command string, input any) (Interaction, error) {
+	return c.runtime.Interact(ctx, command, input)
 }
 
 func (p *Runtime) platformCall(method string, input any, into any) error {
@@ -349,7 +389,18 @@ func (p *Runtime) connectorInvoke(brickID, commandID string, input any, invocati
 	if p.grpcPlatform == nil {
 		return NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
 	}
-	result, err := p.grpcPlatform.Connect(context.Background(), brickID, commandID, input, invocationID)
+	result, err := p.grpcPlatform.Connect(p.outboundContext(nil), brickID, commandID, input, invocationID)
+	if err != nil {
+		return err
+	}
+	return runtimegrpc.AssignJSON(result, into)
+}
+
+func (p *Runtime) connectorInvokeOnHandle(brickID, commandID string, input any, invocationID, handleID string, into any) error {
+	if p.grpcPlatform == nil {
+		return NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
+	}
+	result, err := p.grpcPlatform.ConnectOnHandle(p.outboundContext(nil), brickID, commandID, input, invocationID, handleID)
 	if err != nil {
 		return err
 	}
@@ -360,7 +411,41 @@ func (p *Runtime) connectorInteract(ctx context.Context, brickID, commandID stri
 	if p.grpcPlatform == nil {
 		return nil, NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
 	}
-	return p.grpcPlatform.Interact(ctx, brickID, commandID, input, invocationID)
+	return p.grpcPlatform.Interact(p.outboundContext(ctx), brickID, commandID, input, invocationID)
+}
+
+func (p *Runtime) connectorInteractOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (Interaction, error) {
+	if p.grpcPlatform == nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
+	}
+	return p.grpcPlatform.InteractOnHandle(p.outboundContext(ctx), brickID, commandID, input, invocationID, handleID)
+}
+
+func (p *Runtime) startDependency(_alias string, ref BrickRef) (*StartedToolHandle, error) {
+	if !p.inCommandScope() || p.currentInvocationID() == "" {
+		return nil, parentInvocationRequired(StartRequiresCommand)
+	}
+	if p.grpcPlatform == nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
+	}
+	invocationID := p.currentInvocationID()
+	handleID, err := p.grpcPlatform.StartDependency(p.outboundContext(nil), ref.BrickID, invocationID)
+	if err != nil {
+		return nil, err
+	}
+	return &StartedToolHandle{
+		runtime:      p,
+		ref:          ref,
+		handleID:     handleID,
+		invocationID: invocationID,
+	}, nil
+}
+
+func (p *Runtime) disposeStarted(handleID, invocationID string, stop bool) error {
+	if p.grpcPlatform == nil {
+		return NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
+	}
+	return p.grpcPlatform.DisposeDependency(context.Background(), handleID, invocationID, stop)
 }
 
 // Debug 经 Host PlatformService `diagnostics.log` 进入日志中心。
@@ -383,6 +468,25 @@ func (p *Runtime) Error(message string, err error, fields map[string]any) {
 	p.emitBrickLog("error", message, err, fields, p.currentInvocationID())
 }
 
+func (p *Runtime) enterCommand(id string, cmdCtx context.Context) {
+	p.inCommand.Store(true)
+	p.setCurrentRequestID(id)
+	if cmdCtx == nil {
+		cmdCtx = context.Background()
+	}
+	p.currentCommandCtx.Store(storedCommandCtx{ctx: cmdCtx})
+}
+
+func (p *Runtime) leaveCommand() {
+	p.inCommand.Store(false)
+	p.setCurrentRequestID("")
+	p.currentCommandCtx.Store(storedCommandCtx{})
+}
+
+func (p *Runtime) inCommandScope() bool {
+	return p.inCommand.Load()
+}
+
 func (p *Runtime) setCurrentRequestID(id string) {
 	p.currentRequestID.Store(id)
 }
@@ -390,6 +494,45 @@ func (p *Runtime) setCurrentRequestID(id string) {
 func (p *Runtime) currentInvocationID() string {
 	id, _ := p.currentRequestID.Load().(string)
 	return id
+}
+
+func (p *Runtime) outboundContext(explicit context.Context) context.Context {
+	box, _ := p.currentCommandCtx.Load().(storedCommandCtx)
+	cmd := box.ctx
+	if cmd == nil {
+		if explicit != nil {
+			return explicit
+		}
+		return context.Background()
+	}
+	if explicit == nil || explicit == context.Background() || explicit == cmd {
+		return cmd
+	}
+	ctx, cancel := context.WithCancel(cmd)
+	go func() {
+		select {
+		case <-explicit.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
+}
+
+func invocationIDFromContext(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	values := md.Get(runtimegrpc.InvocationIdMD)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+type storedCommandCtx struct {
+	ctx context.Context
 }
 
 func (p *Runtime) trackEventRequest(id string, cancel func()) {

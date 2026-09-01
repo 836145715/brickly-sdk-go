@@ -12,22 +12,18 @@ import (
 )
 
 type memoryLifetimeHost struct {
-	mu             sync.Mutex
-	seq            int
-	records        map[string]string
-	denyStandalone bool
-	stopped        []string
-	stopGate       chan struct{}
+	mu       sync.Mutex
+	seq      int
+	records  map[string]string
+	stopped  []string
+	stopGate chan struct{}
 }
 
-func newMemoryLifetimeHost(denyStandalone bool) *memoryLifetimeHost {
-	return &memoryLifetimeHost{records: map[string]string{}, denyStandalone: denyStandalone}
+func newMemoryLifetimeHost() *memoryLifetimeHost {
+	return &memoryLifetimeHost{records: map[string]string{}}
 }
 
-func (h *memoryLifetimeHost) Start(_ context.Context, _ BrickRef, options StartToolOptions) (string, error) {
-	if h.denyStandalone && options.AllowStandaloneWindows {
-		return "", NewBppError("PERMISSION_DENIED", "standalone 未授权")
-	}
+func (h *memoryLifetimeHost) Start(_ context.Context, _ BrickRef, _ StartToolOptions) (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.seq++
@@ -79,7 +75,7 @@ func (h *memoryLifetimeHost) InteractOnce(context.Context, BrickRef, string, any
 }
 
 func TestToolLifetimeStartReady(t *testing.T) {
-	sdk := NewToolSdk(newMemoryLifetimeHost(false))
+	sdk := NewToolSdk(newMemoryLifetimeHost())
 	handle, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +89,7 @@ func TestToolLifetimeStartReady(t *testing.T) {
 }
 
 func TestToolLifetimeDisposeHandleClosed(t *testing.T) {
-	sdk := NewToolSdk(newMemoryLifetimeHost(false))
+	sdk := NewToolSdk(newMemoryLifetimeHost())
 	handle, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +108,7 @@ func TestToolLifetimeDisposeHandleClosed(t *testing.T) {
 }
 
 func TestToolLifetimeCloseAliasesDispose(t *testing.T) {
-	sdk := NewToolSdk(newMemoryLifetimeHost(false))
+	sdk := NewToolSdk(newMemoryLifetimeHost())
 	handle, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +145,7 @@ func TestToolHandleDisposeAndCloseHaveNoForce(t *testing.T) {
 }
 
 func TestToolLifetimeStopGoesThroughStopping(t *testing.T) {
-	host := newMemoryLifetimeHost(false)
+	host := newMemoryLifetimeHost()
 	host.stopGate = make(chan struct{})
 	sdk := NewToolSdk(host)
 	handle, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{})
@@ -185,7 +181,7 @@ func TestToolLifetimeStopGoesThroughStopping(t *testing.T) {
 }
 
 func TestToolLifetimeStoppingCanFail(t *testing.T) {
-	host := newMemoryLifetimeHost(false)
+	host := newMemoryLifetimeHost()
 	host.stopGate = make(chan struct{})
 	sdk := NewToolSdk(host)
 	handle, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{})
@@ -221,7 +217,7 @@ func TestPublicLifetimeAPIForbidsLegacyNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(src)
-	for _, token := range []string{"UsageScope", "keepAlive", "Close(force"} {
+	for _, token := range []string{"UsageScope", "keepAlive", "Close(force", "AllowStandaloneWindows"} {
 		if strings.Contains(text, token) {
 			t.Fatalf("公开 API 禁止 %s", token)
 		}
@@ -236,7 +232,7 @@ func TestPublicLifetimeAPIForbidsLegacyNames(t *testing.T) {
 }
 
 func TestToolLifetimeOwnerContextDisposes(t *testing.T) {
-	sdk := NewToolSdk(newMemoryLifetimeHost(false))
+	sdk := NewToolSdk(newMemoryLifetimeHost())
 	ctx, cancel := context.WithCancel(context.Background())
 	handle, err := sdk.Start(ctx, testTargetRef, StartToolOptions{Owner: ctx})
 	if err != nil {
@@ -249,15 +245,6 @@ func TestToolLifetimeOwnerContextDisposes(t *testing.T) {
 	}
 	if handle.State != ToolHandleDisposed {
 		t.Fatalf("state=%s", handle.State)
-	}
-}
-
-func TestToolLifetimeStandaloneDenied(t *testing.T) {
-	sdk := NewToolSdk(newMemoryLifetimeHost(true))
-	_, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{AllowStandaloneWindows: true})
-	var bpp *BppError
-	if !errors.As(err, &bpp) || bpp.Code != "PERMISSION_DENIED" {
-		t.Fatalf("got %v", err)
 	}
 }
 

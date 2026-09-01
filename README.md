@@ -60,9 +60,9 @@ p.OnCommand("live", func(ctx *brickly.CommandContext, input json.RawMessage) (an
 
 ### 进阶：两种子窗
 
-`attached`（默认）随这次调用 / runtime 消失。`standalone` 窗在则 runtime 在，调用方要先 `Start(allowStandaloneWindows)`，建窗写 `"lifetime": "standalone"`。不要把「附加」理解成常驻。
+`attached`（默认）随这次调用 / runtime 消失。`standalone` 窗在则 runtime 在：须声明 `command.window: standalone`，并在命令执行期间创建。后台定时弹窗请 `Invoke` 一条 `window: standalone` 的命令，不要直接 `CreateBrowserWindow`。建窗写 `"lifetime": "standalone"`。不要把「附加」理解成常驻。
 
-长期占用使用 `ToolSdk.Start` 与 `ToolHandle.Dispose`/`Stop`。`Close` 是无 force 参数的 `Dispose` 别名。`Owner` context 只等价于 `Dispose`，不会 `Stop`。子窗口默认 attached。
+长期占用使用 `ToolSdk.Start` 与 `ToolHandle.Dispose`/`Stop`。Runtime 里占用依赖用 `Require(alias).Start()`，必须先进入自己的命令（`Invoke` 中转）；占用跟这次 Call，return 自动放手。`Close` 是无 force 参数的 `Dispose` 别名。`Owner` context 只等价于 `Dispose`，不会 `Stop`。子窗口默认 attached。
 
 ---
 
@@ -73,6 +73,9 @@ p.OnCommand("live", func(ctx *brickly.CommandContext, input json.RawMessage) (an
 | 方法                                               | 作用                                                                       |
 | -------------------------------------------------- | -------------------------------------------------------------------------- |
 | `OnCommand(id, handler)`                           | 注册命令处理器（链式）                                                     |
+| `Invoke(commandID, input)`                          | 再跑自己的一条命令；已有占用则不 Dispose。没有占用则拒绝                   |
+| `Interact(ctx, commandID, input)`                   | 已有占用上再开会话，不 Dispose                                             |
+| `Call(ctx, commandID, input, opts)`                 | Interact + 半关闭的糖；必须与命令 mode=call 对齐                           |
 | `OnReady(fn)`                                      | gRPC Runtime 就绪后异步触发                                                |
 | `OnShutdown(fn)`                                   | Host 关闭 Runtime 时触发                                                   |
 | `UI.CreateBrowserWindow(url, opts)`                | 创建子窗口，返回 `*WindowHandle`                                           |
@@ -95,12 +98,14 @@ p.OnCommand("live", func(ctx *brickly.CommandContext, input json.RawMessage) (an
 | `Send(event)`                                        | 推给调用方（仅 interact）                                                                                                |
 | `OnEvent(handler)`                                   | 收调用方 send（仅 interact）                                                                                             |
 | `Closed()`                                           | 等到调用方 end / 断开                                                                                                    |
-| `Context()`                                          | `context.Context`，收到 `command.cancel` 时被取消                                                                        |
+| `Context()`                                          | `context.Context`，入站 Command RPC 取消时被取消。命令内 `Require(alias).Invoke` / `Interact` 自动用这个 ctx，不必再往下游传 |
 | `IsCancelled()`                                      | 协作式取消轮询                                                                                                           |
 | `CreateResource(content, options)`                   | 在当前 command 生命周期内创建资源；大内容自动绑定上传归属                                                                |
 | `CreateResourceFrom(reader, options)`                | 从 `io.Reader` 流式创建绑定当前 command 生命周期的资源                                                                   |
 | `Dependencies().Require(alias)`                      | 获取绑定当前 command parent、trace 与 Profile 的依赖客户端                                                               |
 | `UI()` / `Events()`                                  | 与 `Runtime.UI` / `Runtime.Events` 同源                                                                                  |
+| `Config()`                                           | 当前 Profile 配置快照                                                                                                    |
+| `Storage()`                                          | 本机持久 KV / collection / secrets；与体验窗共库。看不见路径或 `_rev`                                                     |
 | `Platform()` / `System()`                            | 与 `Runtime.Platform` / `Runtime.System` 同源                                                                            |
 
 `Invocation.DependencyProfiles` 按 alias 对应的精确 `BrickKey` 选择 Profile；显式 Profile 始终优先。
@@ -119,7 +124,7 @@ Brick 可通过 `runtime.CreateResource(content, options)` 主动创建资源；
 流式入口使用 `runtime.CreateResourceFrom(reader, options)`：先把 reader 读入内存，再走同一条
 Create 路径，上限 200 MiB。`CreateResourceWriter` 目前尚未接通 ResourceService，会返回未就绪。
 
-普通 `Invoke` / `InvokeRoot` 始终解码为直接值，逻辑 JSON 输入和结果上限为 10 MiB，一次传完；
+普通 `Invoke` 始终解码为直接值，逻辑 JSON 输入和结果上限为 10 MiB，一次传完；
 超限返回 `PAYLOAD_TOO_LARGE`，不会静默改成资源类型。大结果由作者 `CreateResource`
 后返回 Handle；调用方看到 `ResourceRef`，再 `OpenResource`。EventBus 回调收到的就是
 发布时的业务对象，不会再包一层资源，也不会水合成 `*ResourceHandle`。若业务对象里本身带
@@ -198,13 +203,13 @@ poem, err := brickly.Call(ctx.Context(), openAI, "complete", map[string]any{"pro
 }
 ```
 
-如果需要在 command 外主动创建顶级调用，使用显式 root API：
+没有当前命令时，同一套 `Invoke` / `Call` / `Interact` 就是 root：
 
 ```go
 openAI, err := p.Dependencies.Require("openai")
 if err != nil { return err }
 var out map[string]any
-err = openAI.InvokeRoot(
+err = openAI.Invoke(
     "chat",
     map[string]any{"prompt": "hello"},
     &out,
@@ -536,7 +541,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/window-protocol.schema.json`](../../../specs/window-protocol.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.7.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
+- 当前 SDK 版本：`0.8.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
 - 发布记录见 [`CHANGELOG.md`](./CHANGELOG.md)
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
@@ -559,13 +564,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.7.0
+npm run sdk:go:publish -- 0.8.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.7.0 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.8.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -573,14 +578,14 @@ npm run sdk:go:publish -- 0.7.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.7.0`
-- `git push origin <branch>` 和 `git push origin v0.7.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.7.0` 触发 Go module 缓存
+- `git tag -a v0.8.0`
+- `git push origin <branch>` 和 `git push origin v0.8.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.8.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.7.0
+go get github.com/836145715/brickly-sdk-go@v0.8.0
 ```
 
 ---

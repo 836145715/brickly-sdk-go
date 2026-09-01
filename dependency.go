@@ -141,34 +141,76 @@ func (d *DependencyClient) invokeOptions(opts []InvokeOption) invokeOptions {
 	return options
 }
 
-func (d *DependencyClient) requireActiveCommand(operation string) error {
-	parent := d.parentID()
-	if parent == "" || !d.runtime.isCommandActive(parent) {
-		return parentInvocationRequired(operation + " must run inside an active command handler")
-	}
-	return nil
-}
-
-// Interact 在当前 command 内对依赖开一条 child 双工会话。
+// Interact 对依赖开一条双工会话。没有当前命令时是 root。
 func (d *DependencyClient) Interact(ctx context.Context, commandID string, input any) (Interaction, error) {
-	if err := d.requireActiveCommand("Interact"); err != nil {
-		return nil, err
-	}
 	return d.runtime.connectorInteract(ctx, d.ref.BrickID, commandID, input, d.parentID())
 }
 
-// Invoke 发起 child invocation。
+// Invoke 调用依赖命令。有当前命令则挂为 child，否则是 root。
 func (d *DependencyClient) Invoke(commandID string, input any, into any, opts ...InvokeOption) error {
-	if err := d.requireActiveCommand("Invoke"); err != nil {
-		return err
-	}
 	return d.runtime.invokePrepared(d.ref, commandID, input, into, d.invokeOptions(opts))
 }
 
-// InvokeRoot 发起 root invocation；从 command 获取的 client 会携带审计 parentRequestId。
-func (d *DependencyClient) InvokeRoot(commandID string, input any, into any, opts ...InvokeOption) error {
-	if d.parentRequestID != "" && !d.runtime.isCommandActive(d.parentRequestID) {
-		return parentInvocationRequired("InvokeRoot must use an active command context")
-	}
-	return d.runtime.invokePrepared(d.ref, commandID, input, into, d.invokeOptions(opts))
+// Call 是 interact + 半关闭的糖。必须与命令 mode=call 对齐。
+func (d *DependencyClient) Call(ctx context.Context, commandID string, input any, opts ...CallOptions) (any, error) {
+	return Call(ctx, dependencyBrickClient{d}, commandID, input, opts...)
+}
+
+// Start 命令内占用目标；跟这次 Call，return/cancel 自动放手。命令外请先 brick.invoke。
+func (d *DependencyClient) Start() (*StartedToolHandle, error) {
+	return d.runtime.startDependency(d.alias, d.ref)
+}
+
+const StartRequiresCommand = "命令外不能 start 依赖。请先 brick.invoke 进入自己的命令再 start。"
+
+// StartedToolHandle 是命令内 start 得到的占用；跟这次 Call，return 自动放手。
+type StartedToolHandle struct {
+	runtime      *Runtime
+	ref          BrickRef
+	handleID     string
+	invocationID string
+}
+
+func (h *StartedToolHandle) Invoke(commandID string, input any, into any) error {
+	return h.runtime.connectorInvokeOnHandle(h.ref.BrickID, commandID, input, h.invocationID, h.handleID, into)
+}
+
+func (h *StartedToolHandle) Interact(ctx context.Context, commandID string, input any) (Interaction, error) {
+	return h.runtime.connectorInteractOnHandle(ctx, h.ref.BrickID, commandID, input, h.invocationID, h.handleID)
+}
+
+func (h *StartedToolHandle) Call(ctx context.Context, commandID string, input any, opts ...CallOptions) (any, error) {
+	return Call(ctx, startedHandleClient{h}, commandID, input, opts...)
+}
+
+func (h *StartedToolHandle) Dispose() error {
+	return h.runtime.disposeStarted(h.handleID, h.invocationID, false)
+}
+
+func (h *StartedToolHandle) Stop() error {
+	return h.runtime.disposeStarted(h.handleID, h.invocationID, true)
+}
+
+type dependencyBrickClient struct{ dep *DependencyClient }
+
+func (c dependencyBrickClient) Invoke(_ context.Context, command string, input any) (any, error) {
+	var out any
+	err := c.dep.Invoke(command, input, &out)
+	return out, err
+}
+
+func (c dependencyBrickClient) Interact(ctx context.Context, command string, input any) (Interaction, error) {
+	return c.dep.Interact(ctx, command, input)
+}
+
+type startedHandleClient struct{ handle *StartedToolHandle }
+
+func (c startedHandleClient) Invoke(_ context.Context, command string, input any) (any, error) {
+	var out any
+	err := c.handle.Invoke(command, input, &out)
+	return out, err
+}
+
+func (c startedHandleClient) Interact(ctx context.Context, command string, input any) (Interaction, error) {
+	return c.handle.Interact(ctx, command, input)
 }

@@ -129,10 +129,10 @@ func TestPrepareResourceValueHandlesTypedContainersAndRejectsMalformedRefs(t *te
 	assertBppErrorCode(t, err, "INVALID_RESOURCE_REF")
 }
 
-func TestInvokeRootRejectsMalformedResourceBeforeSending(t *testing.T) {
+func TestInvokeRejectsMalformedResourceBeforeSending(t *testing.T) {
 	p := New()
 	dependency := testDependency(t, p)
-	err := dependency.InvokeRoot(
+	err := dependency.Invoke(
 		"run",
 		map[string]any{"file": map[string]any{"kind": "brickly.resource", "resourceId": "broken"}},
 		nil,

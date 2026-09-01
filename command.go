@@ -29,11 +29,15 @@ func newCommandContext(
 	commandID string,
 	invocation CommandInvocationContext,
 	trace *TraceContext,
+	parent context.Context,
 ) *CommandContext {
 	if invocation.Source == "" {
 		invocation.Source = "unknown"
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	platform := newPlatformAPI(p, trace)
 	c := &CommandContext{
 		RequestID:  reqID,
@@ -108,6 +112,9 @@ func (c *CommandContext) System() *SystemAPI {
 
 // Config 返回由 Host 注入的当前 Profile 配置快照。
 func (c *CommandContext) Config() map[string]any { return c.runtime.Config }
+
+// Storage 返回按 brickId + origin 隔离的本机持久存储。
+func (c *CommandContext) Storage() *StorageAPI { return c.runtime.Storage }
 
 // Debug 挂到当前 command；handler 返回后的异步日志请继续用 Runtime.Debug。
 func (c *CommandContext) Debug(message string, fields map[string]any) {

@@ -54,7 +54,7 @@ func TestInteractSendAndOnEvent(t *testing.T) {
 
 func TestCommandContextUnarySend(t *testing.T) {
 	p := New()
-	ctx := newCommandContext(p, "req", "uppercase", CommandInvocationContext{Source: "unknown"}, nil)
+	ctx := newCommandContext(p, "req", "uppercase", CommandInvocationContext{Source: "unknown"}, nil, nil)
 	if err := ctx.Send("x"); err == nil {
 		t.Fatal("expected PROTOCOL_ERROR")
 	}
@@ -62,7 +62,7 @@ func TestCommandContextUnarySend(t *testing.T) {
 
 func TestCommandContextSendThenReturn(t *testing.T) {
 	p := New()
-	ctx := newCommandContext(p, "req", "complete", CommandInvocationContext{Source: "unknown"}, nil)
+	ctx := newCommandContext(p, "req", "complete", CommandInvocationContext{Source: "unknown"}, nil, nil)
 	incoming := make(chan any)
 	var sent []any
 	ctx.stream = bindInteractStream(func(event any) error {
@@ -85,7 +85,7 @@ func TestCommandContextSendThenReturn(t *testing.T) {
 
 func TestCommandContextOnEventThenClosed(t *testing.T) {
 	p := New()
-	ctx := newCommandContext(p, "req", "chat", CommandInvocationContext{Source: "unknown"}, nil)
+	ctx := newCommandContext(p, "req", "chat", CommandInvocationContext{Source: "unknown"}, nil, nil)
 	incoming := make(chan any, 2)
 	var sent []any
 	ctx.stream = bindInteractStream(func(event any) error {

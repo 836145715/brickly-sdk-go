@@ -11,15 +11,15 @@ import (
 func StatusFromBrickCode(code, message string) error {
 	mapped := codes.Internal
 	switch code {
-	case "INVALID_INPUT", "INVALID_RESOURCE_REF", "RESOURCE_OFFSET_MISMATCH":
+	case "INVALID_INPUT", "INVALID_RESOURCE_REF", "RESOURCE_OFFSET_MISMATCH", "STORAGE_INVALID_KEY":
 		mapped = codes.InvalidArgument
 	case "ACCESS_DENIED", "RESOURCE_ACCESS_DENIED":
 		mapped = codes.PermissionDenied
-	case "NOT_FOUND", "RESOURCE_NOT_FOUND":
+	case "NOT_FOUND", "RESOURCE_NOT_FOUND", "STORAGE_NOT_FOUND":
 		mapped = codes.NotFound
-	case "CONFLICT":
+	case "CONFLICT", "STORAGE_CONFLICT":
 		mapped = codes.Aborted
-	case "LIMIT_EXCEEDED", "RESOURCE_QUOTA_EXCEEDED":
+	case "LIMIT_EXCEEDED", "RESOURCE_QUOTA_EXCEEDED", "STORAGE_VALUE_TOO_LARGE", "STORAGE_QUOTA_EXCEEDED":
 		mapped = codes.ResourceExhausted
 	case "DEADLINE_EXCEEDED":
 		mapped = codes.DeadlineExceeded
@@ -27,7 +27,7 @@ func StatusFromBrickCode(code, message string) error {
 		mapped = codes.Canceled
 	case "OUTCOME_UNKNOWN":
 		mapped = codes.Unavailable
-	case "CALL_CYCLE_DETECTED", "REQUEST_HANDLER_UNAVAILABLE", "RESOURCE_EXPIRED", "RESOURCE_REVOKED":
+	case "CALL_CYCLE_DETECTED", "REQUEST_HANDLER_UNAVAILABLE", "RESOURCE_EXPIRED", "RESOURCE_REVOKED", "STORAGE_UNAVAILABLE":
 		mapped = codes.FailedPrecondition
 	case "RESOURCE_INTEGRITY_FAILED":
 		mapped = codes.DataLoss

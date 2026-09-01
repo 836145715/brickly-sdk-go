@@ -12,7 +12,7 @@ func TestInfoDoesNotPanicWhenPlatformDisconnected(t *testing.T) {
 
 func TestCommandContextLogDoesNotPanicWhenPlatformDisconnected(t *testing.T) {
 	p := New()
-	ctx := newCommandContext(p, "req-1", "echo", CommandInvocationContext{Source: "unknown"}, nil)
+	ctx := newCommandContext(p, "req-1", "echo", CommandInvocationContext{Source: "unknown"}, nil, nil)
 	ctx.Debug("dbg", nil)
 	ctx.Info("ready", map[string]any{"ok": true})
 	ctx.Warn("warn", nil)

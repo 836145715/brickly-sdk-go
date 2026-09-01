@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -15,7 +16,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	options.Invoke = func(commandID string, input *runtimev1.BrickValue, _ string) (*runtimev1.BrickValue, error) {
+	options.Invoke = func(_ context.Context, commandID string, input *runtimev1.BrickValue, _ string) (*runtimev1.BrickValue, error) {
 		if commandID != "fail" {
 			return input, nil
 		}

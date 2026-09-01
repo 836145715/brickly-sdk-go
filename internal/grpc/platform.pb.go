@@ -122,14 +122,15 @@ var File_platform_proto protoreflect.FileDescriptor
 
 const file_platform_proto_rawDesc = "" +
 	"\n" +
-	"\x0eplatform.proto\x12\x12brickly.runtime.v1\x1a\fcommon.proto\"c\n" +
+	"\x0eplatform.proto\x12\x12brickly.runtime.v1\x1a\rcommand.proto\x1a\fcommon.proto\"c\n" +
 	"\x13PlatformCallRequest\x12\x16\n" +
 	"\x06method\x18\x01 \x01(\tR\x06method\x124\n" +
 	"\x05input\x18\x02 \x01(\v2\x1e.brickly.runtime.v1.BrickValueR\x05input\"N\n" +
 	"\x14PlatformCallResponse\x126\n" +
-	"\x06result\x18\x01 \x01(\v2\x1e.brickly.runtime.v1.BrickValueR\x06result2l\n" +
+	"\x06result\x18\x01 \x01(\v2\x1e.brickly.runtime.v1.BrickValueR\x06result2\xbe\x01\n" +
 	"\x0fPlatformService\x12Y\n" +
-	"\x04Call\x12'.brickly.runtime.v1.PlatformCallRequest\x1a(.brickly.runtime.v1.PlatformCallResponseB\xc4\x01\n" +
+	"\x04Call\x12'.brickly.runtime.v1.PlatformCallRequest\x1a(.brickly.runtime.v1.PlatformCallResponse\x12P\n" +
+	"\bInteract\x12\x1f.brickly.runtime.v1.ClientFrame\x1a\x1f.brickly.runtime.v1.ServerFrame(\x010\x01B\xc4\x01\n" +
 	"\x16com.brickly.runtime.v1B\rPlatformProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
@@ -149,14 +150,18 @@ var file_platform_proto_goTypes = []any{
 	(*PlatformCallRequest)(nil),  // 0: brickly.runtime.v1.PlatformCallRequest
 	(*PlatformCallResponse)(nil), // 1: brickly.runtime.v1.PlatformCallResponse
 	(*BrickValue)(nil),           // 2: brickly.runtime.v1.BrickValue
+	(*ClientFrame)(nil),          // 3: brickly.runtime.v1.ClientFrame
+	(*ServerFrame)(nil),          // 4: brickly.runtime.v1.ServerFrame
 }
 var file_platform_proto_depIdxs = []int32{
 	2, // 0: brickly.runtime.v1.PlatformCallRequest.input:type_name -> brickly.runtime.v1.BrickValue
 	2, // 1: brickly.runtime.v1.PlatformCallResponse.result:type_name -> brickly.runtime.v1.BrickValue
 	0, // 2: brickly.runtime.v1.PlatformService.Call:input_type -> brickly.runtime.v1.PlatformCallRequest
-	1, // 3: brickly.runtime.v1.PlatformService.Call:output_type -> brickly.runtime.v1.PlatformCallResponse
-	3, // [3:4] is the sub-list for method output_type
-	2, // [2:3] is the sub-list for method input_type
+	3, // 3: brickly.runtime.v1.PlatformService.Interact:input_type -> brickly.runtime.v1.ClientFrame
+	1, // 4: brickly.runtime.v1.PlatformService.Call:output_type -> brickly.runtime.v1.PlatformCallResponse
+	4, // 5: brickly.runtime.v1.PlatformService.Interact:output_type -> brickly.runtime.v1.ServerFrame
+	4, // [4:6] is the sub-list for method output_type
+	2, // [2:4] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
 	2, // [2:2] is the sub-list for extension extendee
 	0, // [0:2] is the sub-list for field type_name
@@ -167,6 +172,7 @@ func file_platform_proto_init() {
 	if File_platform_proto != nil {
 		return
 	}
+	file_command_proto_init()
 	file_common_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{

@@ -15,9 +15,8 @@ const (
 
 // StartToolOptions 控制显式 start。
 type StartToolOptions struct {
-	ProfileID               string
-	AllowStandaloneWindows  bool
-	Owner                   context.Context
+	ProfileID string
+	Owner     context.Context
 }
 
 // ToolLifetimeHost 是宿主 Lifetime 端口；测试可注入。

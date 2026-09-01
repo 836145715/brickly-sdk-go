@@ -3,7 +3,7 @@ package brickly
 import "encoding/json"
 
 // SdkVersion 是 Go SDK 发布版本（与 Node/Python 包版本对齐）。
-const SdkVersion = "0.7.0"
+const SdkVersion = "0.8.0"
 
 // ProtocolVersion 是当前 SDK 实现的协议版本标记（生产协议包名）。
 // gRPC Register 使用 major=1, minor=0。保持与 Node/Python 一致。

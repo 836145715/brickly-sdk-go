@@ -48,6 +48,12 @@ const (
 //	RESOURCE_QUOTA_EXCEEDED     -> RESOURCE_EXHAUSTED
 //	RESOURCE_OFFSET_MISMATCH    -> INVALID_ARGUMENT
 //	RESOURCE_INTEGRITY_FAILED   -> DATA_LOSS
+//	STORAGE_INVALID_KEY         -> INVALID_ARGUMENT
+//	STORAGE_VALUE_TOO_LARGE     -> RESOURCE_EXHAUSTED
+//	STORAGE_QUOTA_EXCEEDED      -> RESOURCE_EXHAUSTED
+//	STORAGE_CONFLICT            -> ABORTED
+//	STORAGE_NOT_FOUND           -> NOT_FOUND
+//	STORAGE_UNAVAILABLE         -> FAILED_PRECONDITION
 type BrickError struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`

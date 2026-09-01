@@ -9,6 +9,7 @@ package grpc
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -22,10 +23,12 @@ const (
 )
 
 type ConnectorInvokeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	BrickId       string                 `protobuf:"bytes,1,opt,name=brick_id,json=brickId,proto3" json:"brick_id,omitempty"`
-	CommandId     string                 `protobuf:"bytes,2,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	Input         *BrickValue            `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	BrickId   string                 `protobuf:"bytes,1,opt,name=brick_id,json=brickId,proto3" json:"brick_id,omitempty"`
+	CommandId string                 `protobuf:"bytes,2,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Input     *BrickValue            `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	// 命令内 start 得到的不透明 Handle；有则打这份 Lifetime，不走 invokeOnce。
+	HandleId      string `protobuf:"bytes,4,opt,name=handle_id,json=handleId,proto3" json:"handle_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -81,19 +84,176 @@ func (x *ConnectorInvokeRequest) GetInput() *BrickValue {
 	return nil
 }
 
+func (x *ConnectorInvokeRequest) GetHandleId() string {
+	if x != nil {
+		return x.HandleId
+	}
+	return ""
+}
+
+type ConnectorStartRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BrickId       string                 `protobuf:"bytes,1,opt,name=brick_id,json=brickId,proto3" json:"brick_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConnectorStartRequest) Reset() {
+	*x = ConnectorStartRequest{}
+	mi := &file_connector_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConnectorStartRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConnectorStartRequest) ProtoMessage() {}
+
+func (x *ConnectorStartRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_connector_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConnectorStartRequest.ProtoReflect.Descriptor instead.
+func (*ConnectorStartRequest) Descriptor() ([]byte, []int) {
+	return file_connector_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ConnectorStartRequest) GetBrickId() string {
+	if x != nil {
+		return x.BrickId
+	}
+	return ""
+}
+
+type ConnectorStartResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	HandleId      string                 `protobuf:"bytes,1,opt,name=handle_id,json=handleId,proto3" json:"handle_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConnectorStartResponse) Reset() {
+	*x = ConnectorStartResponse{}
+	mi := &file_connector_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConnectorStartResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConnectorStartResponse) ProtoMessage() {}
+
+func (x *ConnectorStartResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_connector_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConnectorStartResponse.ProtoReflect.Descriptor instead.
+func (*ConnectorStartResponse) Descriptor() ([]byte, []int) {
+	return file_connector_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ConnectorStartResponse) GetHandleId() string {
+	if x != nil {
+		return x.HandleId
+	}
+	return ""
+}
+
+type ConnectorDisposeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	HandleId      string                 `protobuf:"bytes,1,opt,name=handle_id,json=handleId,proto3" json:"handle_id,omitempty"`
+	Stop          bool                   `protobuf:"varint,2,opt,name=stop,proto3" json:"stop,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConnectorDisposeRequest) Reset() {
+	*x = ConnectorDisposeRequest{}
+	mi := &file_connector_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConnectorDisposeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConnectorDisposeRequest) ProtoMessage() {}
+
+func (x *ConnectorDisposeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_connector_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConnectorDisposeRequest.ProtoReflect.Descriptor instead.
+func (*ConnectorDisposeRequest) Descriptor() ([]byte, []int) {
+	return file_connector_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ConnectorDisposeRequest) GetHandleId() string {
+	if x != nil {
+		return x.HandleId
+	}
+	return ""
+}
+
+func (x *ConnectorDisposeRequest) GetStop() bool {
+	if x != nil {
+		return x.Stop
+	}
+	return false
+}
+
 var File_connector_proto protoreflect.FileDescriptor
 
 const file_connector_proto_rawDesc = "" +
 	"\n" +
-	"\x0fconnector.proto\x12\x12brickly.runtime.v1\x1a\rcommand.proto\x1a\fcommon.proto\"\x88\x01\n" +
+	"\x0fconnector.proto\x12\x12brickly.runtime.v1\x1a\rcommand.proto\x1a\fcommon.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xa5\x01\n" +
 	"\x16ConnectorInvokeRequest\x12\x19\n" +
 	"\bbrick_id\x18\x01 \x01(\tR\abrickId\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x02 \x01(\tR\tcommandId\x124\n" +
-	"\x05input\x18\x03 \x01(\v2\x1e.brickly.runtime.v1.BrickValueR\x05input2\xc1\x01\n" +
+	"\x05input\x18\x03 \x01(\v2\x1e.brickly.runtime.v1.BrickValueR\x05input\x12\x1b\n" +
+	"\thandle_id\x18\x04 \x01(\tR\bhandleId\"2\n" +
+	"\x15ConnectorStartRequest\x12\x19\n" +
+	"\bbrick_id\x18\x01 \x01(\tR\abrickId\"5\n" +
+	"\x16ConnectorStartResponse\x12\x1b\n" +
+	"\thandle_id\x18\x01 \x01(\tR\bhandleId\"J\n" +
+	"\x17ConnectorDisposeRequest\x12\x1b\n" +
+	"\thandle_id\x18\x01 \x01(\tR\bhandleId\x12\x12\n" +
+	"\x04stop\x18\x02 \x01(\bR\x04stop2\xf1\x02\n" +
 	"\x15BrickConnectorService\x12V\n" +
 	"\x06Invoke\x12*.brickly.runtime.v1.ConnectorInvokeRequest\x1a .brickly.runtime.v1.InvokeResult\x12P\n" +
-	"\bInteract\x12\x1f.brickly.runtime.v1.ClientFrame\x1a\x1f.brickly.runtime.v1.ServerFrame(\x010\x01B\xc5\x01\n" +
+	"\bInteract\x12\x1f.brickly.runtime.v1.ClientFrame\x1a\x1f.brickly.runtime.v1.ServerFrame(\x010\x01\x12^\n" +
+	"\x05Start\x12).brickly.runtime.v1.ConnectorStartRequest\x1a*.brickly.runtime.v1.ConnectorStartResponse\x12N\n" +
+	"\aDispose\x12+.brickly.runtime.v1.ConnectorDisposeRequest\x1a\x16.google.protobuf.EmptyB\xc5\x01\n" +
 	"\x16com.brickly.runtime.v1B\x0eConnectorProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
@@ -108,22 +268,30 @@ func file_connector_proto_rawDescGZIP() []byte {
 	return file_connector_proto_rawDescData
 }
 
-var file_connector_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_connector_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_connector_proto_goTypes = []any{
-	(*ConnectorInvokeRequest)(nil), // 0: brickly.runtime.v1.ConnectorInvokeRequest
-	(*BrickValue)(nil),             // 1: brickly.runtime.v1.BrickValue
-	(*ClientFrame)(nil),            // 2: brickly.runtime.v1.ClientFrame
-	(*InvokeResult)(nil),           // 3: brickly.runtime.v1.InvokeResult
-	(*ServerFrame)(nil),            // 4: brickly.runtime.v1.ServerFrame
+	(*ConnectorInvokeRequest)(nil),  // 0: brickly.runtime.v1.ConnectorInvokeRequest
+	(*ConnectorStartRequest)(nil),   // 1: brickly.runtime.v1.ConnectorStartRequest
+	(*ConnectorStartResponse)(nil),  // 2: brickly.runtime.v1.ConnectorStartResponse
+	(*ConnectorDisposeRequest)(nil), // 3: brickly.runtime.v1.ConnectorDisposeRequest
+	(*BrickValue)(nil),              // 4: brickly.runtime.v1.BrickValue
+	(*ClientFrame)(nil),             // 5: brickly.runtime.v1.ClientFrame
+	(*InvokeResult)(nil),            // 6: brickly.runtime.v1.InvokeResult
+	(*ServerFrame)(nil),             // 7: brickly.runtime.v1.ServerFrame
+	(*emptypb.Empty)(nil),           // 8: google.protobuf.Empty
 }
 var file_connector_proto_depIdxs = []int32{
-	1, // 0: brickly.runtime.v1.ConnectorInvokeRequest.input:type_name -> brickly.runtime.v1.BrickValue
+	4, // 0: brickly.runtime.v1.ConnectorInvokeRequest.input:type_name -> brickly.runtime.v1.BrickValue
 	0, // 1: brickly.runtime.v1.BrickConnectorService.Invoke:input_type -> brickly.runtime.v1.ConnectorInvokeRequest
-	2, // 2: brickly.runtime.v1.BrickConnectorService.Interact:input_type -> brickly.runtime.v1.ClientFrame
-	3, // 3: brickly.runtime.v1.BrickConnectorService.Invoke:output_type -> brickly.runtime.v1.InvokeResult
-	4, // 4: brickly.runtime.v1.BrickConnectorService.Interact:output_type -> brickly.runtime.v1.ServerFrame
-	3, // [3:5] is the sub-list for method output_type
-	1, // [1:3] is the sub-list for method input_type
+	5, // 2: brickly.runtime.v1.BrickConnectorService.Interact:input_type -> brickly.runtime.v1.ClientFrame
+	1, // 3: brickly.runtime.v1.BrickConnectorService.Start:input_type -> brickly.runtime.v1.ConnectorStartRequest
+	3, // 4: brickly.runtime.v1.BrickConnectorService.Dispose:input_type -> brickly.runtime.v1.ConnectorDisposeRequest
+	6, // 5: brickly.runtime.v1.BrickConnectorService.Invoke:output_type -> brickly.runtime.v1.InvokeResult
+	7, // 6: brickly.runtime.v1.BrickConnectorService.Interact:output_type -> brickly.runtime.v1.ServerFrame
+	2, // 7: brickly.runtime.v1.BrickConnectorService.Start:output_type -> brickly.runtime.v1.ConnectorStartResponse
+	8, // 8: brickly.runtime.v1.BrickConnectorService.Dispose:output_type -> google.protobuf.Empty
+	5, // [5:9] is the sub-list for method output_type
+	1, // [1:5] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -142,7 +310,7 @@ func file_connector_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_connector_proto_rawDesc), len(file_connector_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   1,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

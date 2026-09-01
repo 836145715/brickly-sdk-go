@@ -135,11 +135,58 @@ func (c *HostPlatformClient) Connect(ctx context.Context, brickID, commandID str
 		BrickId:   brickID,
 		CommandId: commandID,
 		Input:     value,
+		HandleId:  "",
 	})
 	if err != nil {
 		return nil, err
 	}
 	return brickValueToAny(response.GetResult()), nil
+}
+
+func (c *HostPlatformClient) ConnectOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (any, error) {
+	normalized, err := jsonInput(input)
+	if err != nil {
+		return nil, err
+	}
+	value, err := AnyToBrickValue(normalized)
+	if err != nil {
+		return nil, err
+	}
+	callCtx := c.withToken(ctx)
+	if invocationID != "" {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
+	}
+	response, err := c.connector.Invoke(callCtx, &ConnectorInvokeRequest{
+		BrickId:   brickID,
+		CommandId: commandID,
+		Input:     value,
+		HandleId:  handleID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return brickValueToAny(response.GetResult()), nil
+}
+
+func (c *HostPlatformClient) StartDependency(ctx context.Context, brickID, invocationID string) (string, error) {
+	callCtx := c.withToken(ctx)
+	if invocationID != "" {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
+	}
+	response, err := c.connector.Start(callCtx, &ConnectorStartRequest{BrickId: brickID})
+	if err != nil {
+		return "", err
+	}
+	return response.GetHandleId(), nil
+}
+
+func (c *HostPlatformClient) DisposeDependency(ctx context.Context, handleID, invocationID string, stop bool) error {
+	callCtx := c.withToken(ctx)
+	if invocationID != "" {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
+	}
+	_, err := c.connector.Dispose(callCtx, &ConnectorDisposeRequest{HandleId: handleID, Stop: stop})
+	return err
 }
 
 func (c *HostPlatformClient) Close() error {

@@ -1,6 +1,7 @@
 package brickly
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -78,18 +79,23 @@ func TestDependencyBindingsIsolateSameIDVersionsAndReturnCopies(t *testing.T) {
 
 func TestPublicSurfaceExposesRuntimeAPIs(t *testing.T) {
 	p := New()
-	if p.UI == nil || p.Events == nil || p.Platform == nil || p.System == nil {
+	if p.UI == nil || p.Events == nil || p.Platform == nil || p.System == nil || p.Storage == nil {
 		t.Fatalf("missing runtime APIs: %+v", p)
 	}
 	if p.Platform.System != p.System || p.Platform.Clipboard == nil || p.Platform.Screen == nil || p.Platform.Input == nil || p.Platform.Screenshot == nil {
 		t.Fatalf("incomplete platform surface: %+v", p.Platform)
 	}
+	if p.Dependencies == nil {
+		t.Fatal("missing Dependencies")
+	}
 }
 
-func TestRuntimeInvokeOutsideCommandRequiresRootAPI(t *testing.T) {
+func TestRuntimeInvokeOutsideCommandRequiresHost(t *testing.T) {
 	p := New()
+	_, err := p.Invoke("preview", nil)
+	assertBppErrorCode(t, err, "PROTOCOL_ERROR")
 	dependency := testDependency(t, p)
-	assertBppErrorCode(t, dependency.Invoke("run", nil, nil), "PARENT_INVOCATION_REQUIRED")
+	assertBppErrorCode(t, dependency.Invoke("run", nil, nil), "PROTOCOL_ERROR")
 }
 
 func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
@@ -102,13 +108,106 @@ func TestCommandContextInvocationDefaultsAndPreservesHostContext(t *testing.T) {
 		DependencyProfiles: map[string]string{BrickKeyOf(testTargetRef): "dep-work"},
 		Binding:            map[string]any{"kind": "accelerator", "accelerator": "Alt+O"},
 	}
-	ctx := newCommandContext(p, "cmd-1", "inspect", explicit, nil)
+	ctx := newCommandContext(p, "cmd-1", "inspect", explicit, nil, nil)
 	if ctx.Invocation.Source != "hotkey" || ctx.Invocation.ProfileID != "work" {
 		t.Fatalf("unexpected invocation: %+v", ctx.Invocation)
 	}
-	fallback := newCommandContext(p, "cmd-2", "inspect", CommandInvocationContext{}, nil)
+	fallback := newCommandContext(p, "cmd-2", "inspect", CommandInvocationContext{}, nil, nil)
 	if fallback.Invocation.Source != "unknown" {
 		t.Fatalf("empty invocation source must default to unknown, got %+v", fallback.Invocation)
+	}
+}
+
+func TestOutboundContextFollowsCommandCancel(t *testing.T) {
+	p := New()
+	parent, cancel := context.WithCancel(context.Background())
+	cmd := newCommandContext(p, "cmd-out", "run", CommandInvocationContext{Source: "unknown"}, nil, parent)
+	p.enterCommand("cmd-out", cmd.Context())
+	defer p.leaveCommand()
+	outbound := p.outboundContext(context.Background())
+	if outbound.Err() != nil {
+		t.Fatal("command ctx should be live")
+	}
+	cancel()
+	if outbound.Err() == nil {
+		t.Fatal("出站 ctx 必须随入站 Command 取消")
+	}
+}
+
+func TestOutboundContextMergesExplicitCancel(t *testing.T) {
+	p := New()
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	cmd := newCommandContext(p, "cmd-merge", "run", CommandInvocationContext{Source: "unknown"}, nil, parent)
+	p.enterCommand("cmd-merge", cmd.Context())
+	defer p.leaveCommand()
+	explicit, cancelExplicit := context.WithCancel(context.Background())
+	outbound := p.outboundContext(explicit)
+	cancelExplicit()
+	waitCtxDone(t, outbound)
+}
+
+func TestOutboundContextCommandCancelBeatsLiveExplicit(t *testing.T) {
+	p := New()
+	parent, cancel := context.WithCancel(context.Background())
+	cmd := newCommandContext(p, "cmd-both", "run", CommandInvocationContext{Source: "unknown"}, nil, parent)
+	p.enterCommand("cmd-both", cmd.Context())
+	defer p.leaveCommand()
+	explicit, cancelExplicit := context.WithCancel(context.Background())
+	defer cancelExplicit()
+	outbound := p.outboundContext(explicit)
+	cancel()
+	waitCtxDone(t, outbound)
+}
+
+func TestOutboundContextOutsideCommandUsesExplicit(t *testing.T) {
+	p := New()
+	explicit, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if p.outboundContext(explicit) != explicit {
+		t.Fatal("命令外应原样使用作者 ctx")
+	}
+	if p.outboundContext(nil).Err() != nil {
+		t.Fatal("命令外 nil 应是 Background")
+	}
+}
+
+func TestOutboundContextNilAndSameCmdReturnCommandCtx(t *testing.T) {
+	p := New()
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := newCommandContext(p, "cmd-same", "run", CommandInvocationContext{Source: "unknown"}, nil, parent)
+	p.enterCommand("cmd-same", cmd.Context())
+	defer p.leaveCommand()
+	if p.outboundContext(nil) != cmd.Context() {
+		t.Fatal("Invoke 路径 outboundContext(nil) 必须是命令 ctx")
+	}
+	if p.outboundContext(cmd.Context()) != cmd.Context() {
+		t.Fatal("传入命令 ctx 本身不应再包一层")
+	}
+}
+
+func TestOutboundContextAfterLeaveDetachesFromCommand(t *testing.T) {
+	p := New()
+	parent, cancel := context.WithCancel(context.Background())
+	cmd := newCommandContext(p, "cmd-leave", "run", CommandInvocationContext{Source: "unknown"}, nil, parent)
+	p.enterCommand("cmd-leave", cmd.Context())
+	p.leaveCommand()
+	outbound := p.outboundContext(nil)
+	cancel()
+	if outbound.Err() != nil {
+		t.Fatal("命令结束后新的出站不得再跟入站 ctx")
+	}
+}
+
+func waitCtxDone(t *testing.T, ctx context.Context) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for ctx.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("ctx 未取消")
 	}
 }
 

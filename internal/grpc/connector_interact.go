@@ -11,9 +11,15 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+type interactStream interface {
+	Send(*ClientFrame) error
+	Recv() (*ServerFrame, error)
+	CloseSend() error
+}
+
 // ConnectorInteraction 是 Runtime → Host Connector.Interact 的客户端会话。
 type ConnectorInteraction struct {
-	stream   BrickConnectorService_InteractClient
+	stream   interactStream
 	cancel   context.CancelFunc
 	mu       sync.Mutex
 	outbound uint64
@@ -28,6 +34,49 @@ type ConnectorInteraction struct {
 }
 
 func (c *HostPlatformClient) Interact(ctx context.Context, brickID, commandID string, input any, invocationID string) (*ConnectorInteraction, error) {
+	return c.interact(ctx, brickID, commandID, input, invocationID, "")
+}
+
+func (c *HostPlatformClient) InteractOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (*ConnectorInteraction, error) {
+	return c.interact(ctx, brickID, commandID, input, invocationID, handleID)
+}
+
+func (c *HostPlatformClient) PlatformInteract(ctx context.Context, commandID string, input any, invocationID string) (*ConnectorInteraction, error) {
+	normalized, err := jsonInput(input)
+	if err != nil {
+		return nil, err
+	}
+	value, err := AnyToBrickValue(normalized)
+	if err != nil {
+		return nil, err
+	}
+	callCtx := c.withToken(ctx)
+	if invocationID != "" {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
+	}
+	callCtx, cancel := context.WithCancel(callCtx)
+	stream, err := c.platform.Interact(callCtx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	session := &ConnectorInteraction{
+		stream:  stream,
+		cancel:  cancel,
+		events:  make(chan any, 256),
+		done:    make(chan struct{}),
+		pending: make(map[string]chan resultOrError),
+	}
+	if err := session.open(commandID, value); err != nil {
+		cancel()
+		_ = stream.CloseSend()
+		return nil, err
+	}
+	go session.readLoop()
+	return session, nil
+}
+
+func (c *HostPlatformClient) interact(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (*ConnectorInteraction, error) {
 	normalized, err := jsonInput(input)
 	if err != nil {
 		return nil, err
@@ -40,6 +89,9 @@ func (c *HostPlatformClient) Interact(ctx context.Context, brickID, commandID st
 	callCtx = metadata.AppendToOutgoingContext(callCtx, TargetBrickIdMD, brickID)
 	if invocationID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
+	}
+	if handleID != "" {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, HandleIdMD, handleID)
 	}
 	callCtx, cancel := context.WithCancel(callCtx)
 	stream, err := c.connector.Interact(callCtx)

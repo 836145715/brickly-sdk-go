@@ -11,6 +11,7 @@ import (
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
 // This is a compile-time assertion to ensure that this generated file
@@ -21,6 +22,8 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	BrickConnectorService_Invoke_FullMethodName   = "/brickly.runtime.v1.BrickConnectorService/Invoke"
 	BrickConnectorService_Interact_FullMethodName = "/brickly.runtime.v1.BrickConnectorService/Interact"
+	BrickConnectorService_Start_FullMethodName    = "/brickly.runtime.v1.BrickConnectorService/Start"
+	BrickConnectorService_Dispose_FullMethodName  = "/brickly.runtime.v1.BrickConnectorService/Dispose"
 )
 
 // BrickConnectorServiceClient is the client API for BrickConnectorService service.
@@ -30,9 +33,13 @@ const (
 // BrickConnectorService 供 Runtime 嵌套调用另一个 Brick，不创建新的 Binding。
 // Interact 复用 Command 的 ClientFrame / ServerFrame；目标 brick_id 放 metadata
 // x-brickly-target-brick-id，不另发明一套帧。
+// 命令内 start 的 handle_id：Invoke 走字段，Interact / Dispose 走 metadata
+// x-brickly-handle-id。owner 只由 Host 从当前 Call 注入，工具不得提交 lifetimeId。
 type BrickConnectorServiceClient interface {
 	Invoke(ctx context.Context, in *ConnectorInvokeRequest, opts ...grpc.CallOption) (*InvokeResult, error)
 	Interact(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ClientFrame, ServerFrame], error)
+	Start(ctx context.Context, in *ConnectorStartRequest, opts ...grpc.CallOption) (*ConnectorStartResponse, error)
+	Dispose(ctx context.Context, in *ConnectorDisposeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type brickConnectorServiceClient struct {
@@ -66,6 +73,26 @@ func (c *brickConnectorServiceClient) Interact(ctx context.Context, opts ...grpc
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type BrickConnectorService_InteractClient = grpc.BidiStreamingClient[ClientFrame, ServerFrame]
 
+func (c *brickConnectorServiceClient) Start(ctx context.Context, in *ConnectorStartRequest, opts ...grpc.CallOption) (*ConnectorStartResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConnectorStartResponse)
+	err := c.cc.Invoke(ctx, BrickConnectorService_Start_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *brickConnectorServiceClient) Dispose(ctx context.Context, in *ConnectorDisposeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, BrickConnectorService_Dispose_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BrickConnectorServiceServer is the server API for BrickConnectorService service.
 // All implementations must embed UnimplementedBrickConnectorServiceServer
 // for forward compatibility.
@@ -73,9 +100,13 @@ type BrickConnectorService_InteractClient = grpc.BidiStreamingClient[ClientFrame
 // BrickConnectorService 供 Runtime 嵌套调用另一个 Brick，不创建新的 Binding。
 // Interact 复用 Command 的 ClientFrame / ServerFrame；目标 brick_id 放 metadata
 // x-brickly-target-brick-id，不另发明一套帧。
+// 命令内 start 的 handle_id：Invoke 走字段，Interact / Dispose 走 metadata
+// x-brickly-handle-id。owner 只由 Host 从当前 Call 注入，工具不得提交 lifetimeId。
 type BrickConnectorServiceServer interface {
 	Invoke(context.Context, *ConnectorInvokeRequest) (*InvokeResult, error)
 	Interact(grpc.BidiStreamingServer[ClientFrame, ServerFrame]) error
+	Start(context.Context, *ConnectorStartRequest) (*ConnectorStartResponse, error)
+	Dispose(context.Context, *ConnectorDisposeRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedBrickConnectorServiceServer()
 }
 
@@ -91,6 +122,12 @@ func (UnimplementedBrickConnectorServiceServer) Invoke(context.Context, *Connect
 }
 func (UnimplementedBrickConnectorServiceServer) Interact(grpc.BidiStreamingServer[ClientFrame, ServerFrame]) error {
 	return status.Errorf(codes.Unimplemented, "method Interact not implemented")
+}
+func (UnimplementedBrickConnectorServiceServer) Start(context.Context, *ConnectorStartRequest) (*ConnectorStartResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Start not implemented")
+}
+func (UnimplementedBrickConnectorServiceServer) Dispose(context.Context, *ConnectorDisposeRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Dispose not implemented")
 }
 func (UnimplementedBrickConnectorServiceServer) mustEmbedUnimplementedBrickConnectorServiceServer() {}
 func (UnimplementedBrickConnectorServiceServer) testEmbeddedByValue()                               {}
@@ -138,6 +175,42 @@ func _BrickConnectorService_Interact_Handler(srv interface{}, stream grpc.Server
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type BrickConnectorService_InteractServer = grpc.BidiStreamingServer[ClientFrame, ServerFrame]
 
+func _BrickConnectorService_Start_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConnectorStartRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BrickConnectorServiceServer).Start(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BrickConnectorService_Start_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BrickConnectorServiceServer).Start(ctx, req.(*ConnectorStartRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BrickConnectorService_Dispose_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConnectorDisposeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BrickConnectorServiceServer).Dispose(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BrickConnectorService_Dispose_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BrickConnectorServiceServer).Dispose(ctx, req.(*ConnectorDisposeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BrickConnectorService_ServiceDesc is the grpc.ServiceDesc for BrickConnectorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -148,6 +221,14 @@ var BrickConnectorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Invoke",
 			Handler:    _BrickConnectorService_Invoke_Handler,
+		},
+		{
+			MethodName: "Start",
+			Handler:    _BrickConnectorService_Start_Handler,
+		},
+		{
+			MethodName: "Dispose",
+			Handler:    _BrickConnectorService_Dispose_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
