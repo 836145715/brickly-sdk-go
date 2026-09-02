@@ -68,16 +68,16 @@ type Runtime struct {
 	terminalWindowEventIDs map[string]struct{}
 	terminalWindowOrder    []string
 
-	started       atomic.Bool
-	done          chan struct{}
-	doneOnce      sync.Once
-	grpcHandle    *runtimegrpc.RuntimeHandle
-	grpcResources *runtimegrpc.HostResourceClient
-	grpcPlatform  *runtimegrpc.HostPlatformClient
-	grpcStorage   *runtimegrpc.HostBrickStorageClient
-	currentRequestID atomic.Value
+	started           atomic.Bool
+	done              chan struct{}
+	doneOnce          sync.Once
+	grpcHandle        *runtimegrpc.RuntimeHandle
+	grpcResources     *runtimegrpc.HostResourceClient
+	grpcPlatform      *runtimegrpc.HostPlatformClient
+	grpcStorage       *runtimegrpc.HostBrickStorageClient
+	currentRequestID  atomic.Value
 	currentCommandCtx atomic.Value
-	inCommand        atomic.Bool
+	inCommand         atomic.Bool
 
 	eventSubsMu sync.Mutex
 	eventSubs   map[string]func()
@@ -271,11 +271,17 @@ func (p *Runtime) Invoke(commandID string, input any) (any, error) {
 }
 
 // Interact 已有占用上再开会话，不 Dispose。没有占用则拒绝。
-func (p *Runtime) Interact(ctx context.Context, commandID string, input any) (Interaction, error) {
-	if p.grpcPlatform == nil {
-		return nil, NewBppError("PROTOCOL_ERROR", "PlatformService 未连接；gRPC Runtime 是唯一路径")
+func (p *Runtime) Interact(ctx context.Context, commandID string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
 	}
-	return p.grpcPlatform.PlatformInteract(p.outboundContext(ctx), commandID, input, p.currentInvocationID())
+	session, err := p.platformInteract(ctx, commandID, input, "")
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
 }
 
 // Call 是 interact + 半关闭的糖。必须与命令 mode=call 对齐。
@@ -289,8 +295,24 @@ func (c runtimeSelfClient) Invoke(_ context.Context, command string, input any) 
 	return c.runtime.Invoke(command, input)
 }
 
-func (c runtimeSelfClient) Interact(ctx context.Context, command string, input any) (Interaction, error) {
-	return c.runtime.Interact(ctx, command, input)
+func (c runtimeSelfClient) Interact(ctx context.Context, command string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := c.runtime.platformInteract(ctx, command, input, "call")
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
+}
+
+func (p *Runtime) platformInteract(ctx context.Context, commandID string, input any, intent string) (Interaction, error) {
+	if p.grpcPlatform == nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "PlatformService 未连接；gRPC Runtime 是唯一路径")
+	}
+	return p.grpcPlatform.PlatformInteract(p.outboundContext(ctx), commandID, input, p.currentInvocationID(), intent)
 }
 
 func (p *Runtime) platformCall(method string, input any, into any) error {
@@ -407,18 +429,18 @@ func (p *Runtime) connectorInvokeOnHandle(brickID, commandID string, input any, 
 	return runtimegrpc.AssignJSON(result, into)
 }
 
-func (p *Runtime) connectorInteract(ctx context.Context, brickID, commandID string, input any, invocationID string) (Interaction, error) {
+func (p *Runtime) connectorInteract(ctx context.Context, brickID, commandID string, input any, invocationID, intent string) (Interaction, error) {
 	if p.grpcPlatform == nil {
 		return nil, NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
 	}
-	return p.grpcPlatform.Interact(p.outboundContext(ctx), brickID, commandID, input, invocationID)
+	return p.grpcPlatform.Interact(p.outboundContext(ctx), brickID, commandID, input, invocationID, intent)
 }
 
-func (p *Runtime) connectorInteractOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (Interaction, error) {
+func (p *Runtime) connectorInteractOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID, intent string) (Interaction, error) {
 	if p.grpcPlatform == nil {
 		return nil, NewBppError("PROTOCOL_ERROR", "Host Connector 未连接")
 	}
-	return p.grpcPlatform.InteractOnHandle(p.outboundContext(ctx), brickID, commandID, input, invocationID, handleID)
+	return p.grpcPlatform.InteractOnHandle(p.outboundContext(ctx), brickID, commandID, input, invocationID, handleID, intent)
 }
 
 func (p *Runtime) startDependency(_alias string, ref BrickRef) (*StartedToolHandle, error) {

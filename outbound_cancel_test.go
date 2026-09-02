@@ -188,7 +188,7 @@ func TestConnectorInteractCancelsWhenExplicitContextCanceled(t *testing.T) {
 	explicit, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.connectorInteract(explicit, "com.b", "chat", map[string]any{"n": 1}, "call-ab")
+		_, err := p.connectorInteract(explicit, "com.b", "chat", map[string]any{"n": 1}, "call-ab", "")
 		done <- err
 	}()
 	waitHangEntered(t, hang)
@@ -210,7 +210,7 @@ func TestConnectorInteractCancelsWhenCommandContextCanceled(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.connectorInteract(context.Background(), "com.b", "chat", map[string]any{"n": 1}, "call-ab")
+		_, err := p.connectorInteract(context.Background(), "com.b", "chat", map[string]any{"n": 1}, "call-ab", "")
 		done <- err
 	}()
 	waitHangEntered(t, hang)

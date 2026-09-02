@@ -24,6 +24,7 @@ const (
 	InvocationIdMD   = "x-brickly-invocation-id"
 	TargetBrickIdMD  = "x-brickly-target-brick-id"
 	HandleIdMD       = "x-brickly-handle-id"
+	IntentMD         = "x-brickly-intent"
 	HostEndpointEnv  = "BRICKLY_HOST_ENDPOINT"
 	BootstrapEnv     = "BRICKLY_BOOTSTRAP_TOKEN"
 	RuntimeToHostEnv = "BRICKLY_RUNTIME_TO_HOST_TOKEN"

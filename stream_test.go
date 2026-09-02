@@ -45,13 +45,30 @@ func (c *fakeClient) Invoke(context.Context, string, any) (any, error) {
 	return nil, nil
 }
 
-func (c *fakeClient) Interact(_ context.Context, command string, input any) (Interaction, error) {
+func (c *fakeClient) Interact(_ context.Context, command string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
 	c.command = command
 	c.input = input
+	if c.session != nil && options.OnEvent != nil {
+		for event := range c.session.events {
+			options.OnEvent(event)
+		}
+	}
 	return c.session, nil
 }
 
 func tPanic(message string) { panic(message) }
+
+func TestInteractRequiresOnEvent(t *testing.T) {
+	client := &fakeClient{session: &fakeInteraction{events: make(chan any)}}
+	_, err := client.Interact(context.Background(), "chat", nil)
+	if err == nil || err.Error() != "INVALID_ARGUMENT: interact 必须传入 OnEvent" {
+		t.Fatalf("expected interact OnEvent required, got %#v", err)
+	}
+}
 
 func TestCallRequiresOnEvent(t *testing.T) {
 	client := &fakeClient{session: &fakeInteraction{events: make(chan any)}}
@@ -85,5 +102,22 @@ func TestCallUsesInteractThenEnd(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result, map[string]any{"text": "诗"}) {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+type publicOnlyInteraction struct{}
+
+func (publicOnlyInteraction) Send(context.Context, any) error                 { return nil }
+func (publicOnlyInteraction) SendLatest(context.Context, string, any) error   { return nil }
+func (publicOnlyInteraction) Request(context.Context, any) (any, error)       { return nil, nil }
+func (publicOnlyInteraction) End(context.Context, ...int) (any, error)        { return nil, nil }
+func (publicOnlyInteraction) Cancel(string)                                  {}
+
+func TestPublicInteractionHasNoResult(t *testing.T) {
+	var session Interaction = publicOnlyInteraction{}
+	if _, ok := any(session).(interface {
+		Result() (any, error)
+	}); ok {
+		t.Fatal("公开 Interaction 不得要求 Result()")
 	}
 }

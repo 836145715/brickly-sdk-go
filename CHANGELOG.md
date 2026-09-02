@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
+
+### Breaking
+
+- `Interact` 必须传入 `OnEvent`；缺回调立即 `INVALID_ARGUMENT`。拿最终值只走 `session.End`。公开 `Interaction` 本来就没有 `Result()`。
 
 ## 0.8.0
 

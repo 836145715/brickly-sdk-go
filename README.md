@@ -74,7 +74,7 @@ p.OnCommand("live", func(ctx *brickly.CommandContext, input json.RawMessage) (an
 | -------------------------------------------------- | -------------------------------------------------------------------------- |
 | `OnCommand(id, handler)`                           | 注册命令处理器（链式）                                                     |
 | `Invoke(commandID, input)`                          | 再跑自己的一条命令；已有占用则不 Dispose。没有占用则拒绝                   |
-| `Interact(ctx, commandID, input)`                   | 已有占用上再开会话，不 Dispose                                             |
+| `Interact(ctx, commandID, input, opts)`             | 已有占用上再开会话，不 Dispose；必须传入 `OnEvent`                         |
 | `Call(ctx, commandID, input, opts)`                 | Interact + 半关闭的糖；必须与命令 mode=call 对齐                           |
 | `OnReady(fn)`                                      | gRPC Runtime 就绪后异步触发                                                |
 | `OnShutdown(fn)`                                   | Host 关闭 Runtime 时触发                                                   |
@@ -240,6 +240,10 @@ openAI, err := ctx.Dependencies().Require("openai")
 if err != nil { return nil, err }
 session, err := openAI.Interact(ctx.Context(), "chat", map[string]any{
     "prompt": "继续刚才的话题",
+}, brickly.InteractOptions{
+    OnEvent: func(event any) {
+        _ = ctx.Send(event)
+    },
 })
 if err != nil { return nil, err }
 _, err = session.End(ctx.Context())
@@ -541,7 +545,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/window-protocol.schema.json`](../../../specs/window-protocol.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.8.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
+- 当前 SDK 版本：`0.9.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
 - 发布记录见 [`CHANGELOG.md`](./CHANGELOG.md)
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
@@ -564,13 +568,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-npm run sdk:go:publish -- 0.8.0
+npm run sdk:go:publish -- 0.9.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-npm run sdk:go:publish -- 0.8.0 --repo D:\brick-project\brickly-sdk-go
+npm run sdk:go:publish -- 0.9.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -578,14 +582,14 @@ npm run sdk:go:publish -- 0.8.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.8.0`
-- `git push origin <branch>` 和 `git push origin v0.8.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.8.0` 触发 Go module 缓存
+- `git tag -a v0.9.0`
+- `git push origin <branch>` 和 `git push origin v0.9.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.9.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.8.0
+go get github.com/836145715/brickly-sdk-go@v0.9.0
 ```
 
 ---

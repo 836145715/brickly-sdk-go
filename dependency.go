@@ -142,8 +142,17 @@ func (d *DependencyClient) invokeOptions(opts []InvokeOption) invokeOptions {
 }
 
 // Interact 对依赖开一条双工会话。没有当前命令时是 root。
-func (d *DependencyClient) Interact(ctx context.Context, commandID string, input any) (Interaction, error) {
-	return d.runtime.connectorInteract(ctx, d.ref.BrickID, commandID, input, d.parentID())
+func (d *DependencyClient) Interact(ctx context.Context, commandID string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := d.runtime.connectorInteract(ctx, d.ref.BrickID, commandID, input, d.parentID(), "")
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
 }
 
 // Invoke 调用依赖命令。有当前命令则挂为 child，否则是 root。
@@ -175,8 +184,17 @@ func (h *StartedToolHandle) Invoke(commandID string, input any, into any) error 
 	return h.runtime.connectorInvokeOnHandle(h.ref.BrickID, commandID, input, h.invocationID, h.handleID, into)
 }
 
-func (h *StartedToolHandle) Interact(ctx context.Context, commandID string, input any) (Interaction, error) {
-	return h.runtime.connectorInteractOnHandle(ctx, h.ref.BrickID, commandID, input, h.invocationID, h.handleID)
+func (h *StartedToolHandle) Interact(ctx context.Context, commandID string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := h.runtime.connectorInteractOnHandle(ctx, h.ref.BrickID, commandID, input, h.invocationID, h.handleID, "")
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
 }
 
 func (h *StartedToolHandle) Call(ctx context.Context, commandID string, input any, opts ...CallOptions) (any, error) {
@@ -199,8 +217,17 @@ func (c dependencyBrickClient) Invoke(_ context.Context, command string, input a
 	return out, err
 }
 
-func (c dependencyBrickClient) Interact(ctx context.Context, command string, input any) (Interaction, error) {
-	return c.dep.Interact(ctx, command, input)
+func (c dependencyBrickClient) Interact(ctx context.Context, command string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := c.dep.runtime.connectorInteract(ctx, c.dep.ref.BrickID, command, input, c.dep.parentID(), "call")
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
 }
 
 type startedHandleClient struct{ handle *StartedToolHandle }
@@ -211,6 +238,23 @@ func (c startedHandleClient) Invoke(_ context.Context, command string, input any
 	return out, err
 }
 
-func (c startedHandleClient) Interact(ctx context.Context, command string, input any) (Interaction, error) {
-	return c.handle.Interact(ctx, command, input)
+func (c startedHandleClient) Interact(ctx context.Context, command string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := c.handle.runtime.connectorInteractOnHandle(
+		ctx,
+		c.handle.ref.BrickID,
+		command,
+		input,
+		c.handle.invocationID,
+		c.handle.handleID,
+		"call",
+	)
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
 }

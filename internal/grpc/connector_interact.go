@@ -33,15 +33,15 @@ type ConnectorInteraction struct {
 	inputClosed bool
 }
 
-func (c *HostPlatformClient) Interact(ctx context.Context, brickID, commandID string, input any, invocationID string) (*ConnectorInteraction, error) {
-	return c.interact(ctx, brickID, commandID, input, invocationID, "")
+func (c *HostPlatformClient) Interact(ctx context.Context, brickID, commandID string, input any, invocationID string, intent ...string) (*ConnectorInteraction, error) {
+	return c.interact(ctx, brickID, commandID, input, invocationID, "", firstIntent(intent))
 }
 
-func (c *HostPlatformClient) InteractOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (*ConnectorInteraction, error) {
-	return c.interact(ctx, brickID, commandID, input, invocationID, handleID)
+func (c *HostPlatformClient) InteractOnHandle(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string, intent ...string) (*ConnectorInteraction, error) {
+	return c.interact(ctx, brickID, commandID, input, invocationID, handleID, firstIntent(intent))
 }
 
-func (c *HostPlatformClient) PlatformInteract(ctx context.Context, commandID string, input any, invocationID string) (*ConnectorInteraction, error) {
+func (c *HostPlatformClient) PlatformInteract(ctx context.Context, commandID string, input any, invocationID string, intent ...string) (*ConnectorInteraction, error) {
 	normalized, err := jsonInput(input)
 	if err != nil {
 		return nil, err
@@ -54,6 +54,7 @@ func (c *HostPlatformClient) PlatformInteract(ctx context.Context, commandID str
 	if invocationID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
 	}
+	callCtx = appendCommandIntent(callCtx, firstIntent(intent))
 	callCtx, cancel := context.WithCancel(callCtx)
 	stream, err := c.platform.Interact(callCtx)
 	if err != nil {
@@ -76,7 +77,7 @@ func (c *HostPlatformClient) PlatformInteract(ctx context.Context, commandID str
 	return session, nil
 }
 
-func (c *HostPlatformClient) interact(ctx context.Context, brickID, commandID string, input any, invocationID, handleID string) (*ConnectorInteraction, error) {
+func (c *HostPlatformClient) interact(ctx context.Context, brickID, commandID string, input any, invocationID, handleID, intent string) (*ConnectorInteraction, error) {
 	normalized, err := jsonInput(input)
 	if err != nil {
 		return nil, err
@@ -93,6 +94,7 @@ func (c *HostPlatformClient) interact(ctx context.Context, brickID, commandID st
 	if handleID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, HandleIdMD, handleID)
 	}
+	callCtx = appendCommandIntent(callCtx, intent)
 	callCtx, cancel := context.WithCancel(callCtx)
 	stream, err := c.connector.Interact(callCtx)
 	if err != nil {
@@ -354,4 +356,18 @@ func randomMessageID() []byte {
 	id := make([]byte, 16)
 	_, _ = rand.Read(id)
 	return id
+}
+
+func firstIntent(intent []string) string {
+	if len(intent) > 0 {
+		return intent[0]
+	}
+	return ""
+}
+
+func appendCommandIntent(ctx context.Context, intent string) context.Context {
+	if intent == "call" {
+		return metadata.AppendToOutgoingContext(ctx, IntentMD, "call")
+	}
+	return ctx
 }
