@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: storage.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -204,8 +204,8 @@ const file_storage_proto_rawDesc = "" +
 	"\x0eStorageService\x12N\n" +
 	"\x03Get\x12%.brickly.runtime.v1.StorageKeyRequest\x1a .brickly.runtime.v1.StorageValue\x12D\n" +
 	"\x03Set\x12%.brickly.runtime.v1.StorageSetRequest\x1a\x16.google.protobuf.Empty\x12G\n" +
-	"\x06Delete\x12%.brickly.runtime.v1.StorageKeyRequest\x1a\x16.google.protobuf.EmptyB\xc3\x01\n" +
-	"\x16com.brickly.runtime.v1B\fStorageProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\x06Delete\x12%.brickly.runtime.v1.StorageKeyRequest\x1a\x16.google.protobuf.EmptyB\xd1\x01\n" +
+	"\x16com.brickly.runtime.v1B\fStorageProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_storage_proto_rawDescOnce sync.Once

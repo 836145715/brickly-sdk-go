@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: window.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -266,8 +266,8 @@ const file_window_proto_rawDesc = "" +
 	"\tdestroyed\x18\x04 \x01(\bR\tdestroyed2\xd5\x01\n" +
 	"\rWindowService\x12Y\n" +
 	"\tGetBounds\x12*.brickly.runtime.v1.GetWindowBoundsRequest\x1a .brickly.runtime.v1.WindowBounds\x12i\n" +
-	"\x0eSubscribeState\x12/.brickly.runtime.v1.SubscribeWindowStateRequest\x1a$.brickly.runtime.v1.WindowStateEvent0\x01B\xc2\x01\n" +
-	"\x16com.brickly.runtime.v1B\vWindowProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\x0eSubscribeState\x12/.brickly.runtime.v1.SubscribeWindowStateRequest\x1a$.brickly.runtime.v1.WindowStateEvent0\x01B\xd0\x01\n" +
+	"\x16com.brickly.runtime.v1B\vWindowProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_window_proto_rawDescOnce sync.Once

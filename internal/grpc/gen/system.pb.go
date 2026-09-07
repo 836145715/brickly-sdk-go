@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: system.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -84,8 +84,8 @@ const file_system_proto_rawDesc = "" +
 	"\x02os\x18\x01 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x02 \x01(\tR\x04arch2R\n" +
 	"\rSystemService\x12A\n" +
-	"\aGetInfo\x12\x16.google.protobuf.Empty\x1a\x1e.brickly.runtime.v1.SystemInfoB\xc2\x01\n" +
-	"\x16com.brickly.runtime.v1B\vSystemProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\aGetInfo\x12\x16.google.protobuf.Empty\x1a\x1e.brickly.runtime.v1.SystemInfoB\xd0\x01\n" +
+	"\x16com.brickly.runtime.v1B\vSystemProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_system_proto_rawDescOnce sync.Once

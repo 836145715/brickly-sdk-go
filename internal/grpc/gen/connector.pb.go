@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: connector.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -253,8 +253,8 @@ const file_connector_proto_rawDesc = "" +
 	"\x06Invoke\x12*.brickly.runtime.v1.ConnectorInvokeRequest\x1a .brickly.runtime.v1.InvokeResult\x12P\n" +
 	"\bInteract\x12\x1f.brickly.runtime.v1.ClientFrame\x1a\x1f.brickly.runtime.v1.ServerFrame(\x010\x01\x12^\n" +
 	"\x05Start\x12).brickly.runtime.v1.ConnectorStartRequest\x1a*.brickly.runtime.v1.ConnectorStartResponse\x12N\n" +
-	"\aDispose\x12+.brickly.runtime.v1.ConnectorDisposeRequest\x1a\x16.google.protobuf.EmptyB\xc5\x01\n" +
-	"\x16com.brickly.runtime.v1B\x0eConnectorProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\aDispose\x12+.brickly.runtime.v1.ConnectorDisposeRequest\x1a\x16.google.protobuf.EmptyB\xd3\x01\n" +
+	"\x16com.brickly.runtime.v1B\x0eConnectorProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_connector_proto_rawDescOnce sync.Once

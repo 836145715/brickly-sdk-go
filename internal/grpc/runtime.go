@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -39,6 +40,7 @@ type InteractSession interface {
 	Send(event any) error
 	Events() <-chan any
 	Context() context.Context
+	HandleRequests(handler func(req any, ctx context.Context) (any, error), concurrency ...int) error
 }
 
 type StartOptions struct {
@@ -47,14 +49,14 @@ type StartOptions struct {
 	RuntimeToHostToken string
 	HostToRuntimeToken string
 	Commands           []string
-	Invoke             func(ctx context.Context, commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
+	Invoke             func(ctx context.Context, commandID string, input *runtimev1.BrickValue, invocationID string) (*runtimev1.BrickValue, error)
 	Interact           func(commandID string, session InteractSession) (any, error)
 }
 
 type RuntimeHandle struct {
-	Endpoint         string
-	RuntimeHandleID  string
-	closeFn          func()
+	Endpoint        string
+	RuntimeHandleID string
+	closeFn         func()
 }
 
 func (h *RuntimeHandle) Close() {
@@ -80,27 +82,27 @@ func TakeRuntimeEnv() (StartOptions, error) {
 }
 
 type commandServer struct {
-	UnimplementedBrickCommandServiceServer
+	runtimev1.UnimplementedBrickCommandServiceServer
 	hostToken string
-	invoke    func(ctx context.Context, commandID string, input *BrickValue, invocationID string) (*BrickValue, error)
+	invoke    func(ctx context.Context, commandID string, input *runtimev1.BrickValue, invocationID string) (*runtimev1.BrickValue, error)
 	interact  func(commandID string, session InteractSession) (any, error)
 }
 
-func (s *commandServer) Invoke(ctx context.Context, request *InvokeRequest) (*InvokeResult, error) {
+func (s *commandServer) Invoke(ctx context.Context, request *runtimev1.InvokeRequest) (*runtimev1.InvokeResult, error) {
 	if s.invoke != nil {
 		result, err := s.invoke(ctx, request.GetCommandId(), request.GetInput(), incomingMetadataValue(ctx, InvocationIdMD))
 		if err != nil {
 			return nil, StatusFromError(err)
 		}
-		return &InvokeResult{Result: result}, nil
+		return &runtimev1.InvokeResult{Result: result}, nil
 	}
 	if request.GetCommandId() != "echo" {
 		return nil, status.Errorf(codes.Unimplemented, "spike 仅支持 echo")
 	}
-	return &InvokeResult{Result: request.GetInput()}, nil
+	return &runtimev1.InvokeResult{Result: request.GetInput()}, nil
 }
 
-func (s *commandServer) Interact(stream grpc.BidiStreamingServer[ClientFrame, ServerFrame]) error {
+func (s *commandServer) Interact(stream grpc.BidiStreamingServer[runtimev1.ClientFrame, runtimev1.ServerFrame]) error {
 	if s.interact != nil {
 		return s.dispatchInteract(stream)
 	}
@@ -129,7 +131,7 @@ func StartRuntime(options StartOptions) (*RuntimeHandle, error) {
 			return handler(srv, ss)
 		}),
 	)
-	RegisterBrickCommandServiceServer(server, &commandServer{
+	runtimev1.RegisterBrickCommandServiceServer(server, &commandServer{
 		hostToken: options.HostToRuntimeToken,
 		invoke:    options.Invoke,
 		interact:  options.Interact,
@@ -152,12 +154,12 @@ func StartRuntime(options StartOptions) (*RuntimeHandle, error) {
 		server.Stop()
 		return nil, err
 	}
-	client := NewRuntimeRegistryClient(conn)
+	client := runtimev1.NewRuntimeRegistryClient(conn)
 	ctx := metadata.AppendToOutgoingContext(context.Background(), BootstrapTokenMD, options.BootstrapToken)
-	response, err := client.Register(ctx, &RegisterRequest{
+	response, err := client.Register(ctx, &runtimev1.RegisterRequest{
 		Endpoint: endpoint,
-		Protocol: &ProtocolVersion{Major: 1, Minor: 0},
-		Capabilities: &CapabilitySummary{
+		Protocol: &runtimev1.ProtocolVersion{Major: 1, Minor: 0},
+		Capabilities: &runtimev1.CapabilitySummary{
 			Commands:         declaredCommands(options.Commands),
 			SupportsInteract: true,
 		},
@@ -172,7 +174,7 @@ func StartRuntime(options StartOptions) (*RuntimeHandle, error) {
 		RuntimeHandleID: response.GetRuntimeHandleId(),
 		closeFn: func() {
 			unregCtx := metadata.AppendToOutgoingContext(context.Background(), RuntimeTokenMD, options.RuntimeToHostToken)
-			_, _ = client.Unregister(unregCtx, &UnregisterRequest{})
+			_, _ = client.Unregister(unregCtx, &runtimev1.UnregisterRequest{})
 			_ = conn.Close()
 			server.GracefulStop()
 		},

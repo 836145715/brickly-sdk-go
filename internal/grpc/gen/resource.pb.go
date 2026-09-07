@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: resource.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -587,8 +587,8 @@ const file_resource_proto_rawDesc = "" +
 	"\x06Create\x12&.brickly.runtime.v1.ResourceWriteFrame\x1a\x1f.brickly.runtime.v1.ResourceRef(\x01\x12T\n" +
 	"\x04Read\x12'.brickly.runtime.v1.ResourceReadRequest\x1a!.brickly.runtime.v1.ResourceChunk0\x01\x12U\n" +
 	"\x04Stat\x12'.brickly.runtime.v1.ResourceStatRequest\x1a$.brickly.runtime.v1.ResourceMetadata\x12K\n" +
-	"\x06Revoke\x12).brickly.runtime.v1.ResourceRevokeRequest\x1a\x16.google.protobuf.EmptyB\xc4\x01\n" +
-	"\x16com.brickly.runtime.v1B\rResourceProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\x06Revoke\x12).brickly.runtime.v1.ResourceRevokeRequest\x1a\x16.google.protobuf.EmptyB\xd2\x01\n" +
+	"\x16com.brickly.runtime.v1B\rResourceProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_resource_proto_rawDescOnce sync.Once

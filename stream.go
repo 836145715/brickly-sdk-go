@@ -10,6 +10,7 @@ import (
 type Interaction interface {
 	Send(ctx context.Context, event any) error
 	SendLatest(ctx context.Context, key string, event any) error
+	// Request 等这一条回复。取消 ctx 只停这一条，等同 Node pending.cancel()。
 	Request(ctx context.Context, request any) (any, error)
 	End(ctx context.Context, timeoutMs ...int) (any, error)
 	Cancel(reason string)

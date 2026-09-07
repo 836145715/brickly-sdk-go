@@ -1,6 +1,7 @@
 package brickly
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -12,6 +13,9 @@ func TestUnarySendAndOnEventRejected(t *testing.T) {
 	}
 	if err := stream.OnEvent(func(any) {}); err == nil {
 		t.Fatal("expected onEvent error")
+	}
+	if err := stream.HandleRequests(func(any, context.Context) (any, error) { return nil, nil }); err == nil {
+		t.Fatal("expected handleRequests error")
 	}
 	select {
 	case <-stream.Closed():
@@ -26,7 +30,7 @@ func TestInteractSendAndOnEvent(t *testing.T) {
 	stream := bindInteractStream(func(event any) error {
 		sent = append(sent, event)
 		return nil
-	}, incoming)
+	}, incoming, nil)
 
 	incoming <- map[string]any{"text": "你好"}
 	incoming <- map[string]any{"text": "再简洁"}
@@ -68,7 +72,7 @@ func TestCommandContextSendThenReturn(t *testing.T) {
 	ctx.stream = bindInteractStream(func(event any) error {
 		sent = append(sent, event)
 		return nil
-	}, incoming)
+	}, incoming, nil)
 	if err := ctx.Send(map[string]any{"type": "token", "text": "诗"}); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +95,7 @@ func TestCommandContextOnEventThenClosed(t *testing.T) {
 	ctx.stream = bindInteractStream(func(event any) error {
 		sent = append(sent, event)
 		return nil
-	}, incoming)
+	}, incoming, nil)
 	incoming <- map[string]any{"text": "你好"}
 	incoming <- map[string]any{"text": "再简洁"}
 	close(incoming)
@@ -107,5 +111,41 @@ func TestCommandContextOnEventThenClosed(t *testing.T) {
 	}
 	if len(sent) != 2 {
 		t.Fatalf("sent %#v", sent)
+	}
+}
+
+func TestCommandContextUnaryHandleRequests(t *testing.T) {
+	p := New()
+	ctx := newCommandContext(p, "req", "uppercase", CommandInvocationContext{Source: "unknown"}, nil, nil)
+	err := ctx.HandleRequests(func(any, context.Context) (any, error) { return nil, nil })
+	if err == nil {
+		t.Fatal("expected PROTOCOL_ERROR")
+	}
+	bpp, ok := err.(*BppError)
+	if !ok || bpp.Code != "PROTOCOL_ERROR" {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCommandContextHandleRequestsDelegates(t *testing.T) {
+	p := New()
+	ctx := newCommandContext(p, "req", "assist", CommandInvocationContext{Source: "unknown"}, nil, nil)
+	incoming := make(chan any)
+	registered := 0
+	ctx.stream = bindInteractStream(func(any) error { return nil }, incoming, func(func(any, context.Context) (any, error), ...int) error {
+		registered++
+		return nil
+	})
+	if err := ctx.HandleRequests(func(any, context.Context) (any, error) { return map[string]any{"ok": true}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if registered != 1 {
+		t.Fatalf("registered %d", registered)
+	}
+	close(incoming)
+	select {
+	case <-ctx.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("closed timeout")
 	}
 }

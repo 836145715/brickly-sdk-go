@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -27,7 +28,7 @@ func TestRuntimeAcceptsTenMiBInvoke(t *testing.T) {
 		grpc.MaxRecvMsgSize(invokeMaxBytes),
 		grpc.MaxSendMsgSize(invokeMaxBytes),
 	)
-	RegisterBrickCommandServiceServer(server, &commandServer{})
+	runtimev1.RegisterBrickCommandServiceServer(server, &commandServer{})
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -44,11 +45,11 @@ func TestRuntimeAcceptsTenMiBInvoke(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	client := NewBrickCommandServiceClient(conn)
+	client := runtimev1.NewBrickCommandServiceClient(conn)
 	payload := bytes.Repeat([]byte{7}, 10*1024*1024)
-	result, err := client.Invoke(context.Background(), &InvokeRequest{
+	result, err := client.Invoke(context.Background(), &runtimev1.InvokeRequest{
 		CommandId: "echo",
-		Input:     &BrickValue{Value: &BrickValue_BytesValue{BytesValue: payload}},
+		Input:     &runtimev1.BrickValue{Value: &runtimev1.BrickValue_BytesValue{BytesValue: payload}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +69,7 @@ func TestRuntimeRejectsOverWireInvoke(t *testing.T) {
 		grpc.MaxRecvMsgSize(invokeMaxBytes),
 		grpc.MaxSendMsgSize(invokeMaxBytes),
 	)
-	RegisterBrickCommandServiceServer(server, &commandServer{})
+	runtimev1.RegisterBrickCommandServiceServer(server, &commandServer{})
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -85,11 +86,11 @@ func TestRuntimeRejectsOverWireInvoke(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	client := NewBrickCommandServiceClient(conn)
+	client := runtimev1.NewBrickCommandServiceClient(conn)
 	payload := bytes.Repeat([]byte{1}, invokeMaxBytes+8)
-	_, err = client.Invoke(context.Background(), &InvokeRequest{
+	_, err = client.Invoke(context.Background(), &runtimev1.InvokeRequest{
 		CommandId: "echo",
-		Input:     &BrickValue{Value: &BrickValue_BytesValue{BytesValue: payload}},
+		Input:     &runtimev1.BrickValue{Value: &runtimev1.BrickValue_BytesValue{BytesValue: payload}},
 	})
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("超线 invoke 应为 ResourceExhausted，得到 %v", err)

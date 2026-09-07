@@ -4,7 +4,7 @@
 // - protoc             (unknown)
 // source: platform.proto
 
-package grpc
+package runtimev1
 
 import (
 	context "context"
@@ -29,6 +29,7 @@ const (
 //
 // PlatformService 承接原 host.platform.* 能力，使用 BrickValue 而不是 BPP/Base64。
 // Interact 复用 Command 的 ClientFrame / ServerFrame，打已有占用上自己的命令。
+// call 与 interact 共用本 RPC：metadata x-brickly-intent 为 call | interact，缺省 interact。
 type PlatformServiceClient interface {
 	Call(ctx context.Context, in *PlatformCallRequest, opts ...grpc.CallOption) (*PlatformCallResponse, error)
 	Interact(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ClientFrame, ServerFrame], error)
@@ -71,6 +72,7 @@ type PlatformService_InteractClient = grpc.BidiStreamingClient[ClientFrame, Serv
 //
 // PlatformService 承接原 host.platform.* 能力，使用 BrickValue 而不是 BPP/Base64。
 // Interact 复用 Command 的 ClientFrame / ServerFrame，打已有占用上自己的命令。
+// call 与 interact 共用本 RPC：metadata x-brickly-intent 为 call | interact，缺省 interact。
 type PlatformServiceServer interface {
 	Call(context.Context, *PlatformCallRequest) (*PlatformCallResponse, error)
 	Interact(grpc.BidiStreamingServer[ClientFrame, ServerFrame]) error

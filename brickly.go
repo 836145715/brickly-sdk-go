@@ -6,7 +6,9 @@
 //	p.OnCommand("hello", func(ctx *brickly.CommandContext, input json.RawMessage) (any, error) {
 //	    return map[string]any{"ok": true}, nil
 //	})
-//	p.Start() // 阻塞，直到 gRPC Runtime 退出
+//	if err := p.Start(); err != nil { // 缺 Host 时返回 error；成功则阻塞直到退出
+//	    log.Fatal(err)
+//	}
 //
 // 生产路径只走 Host gRPC；业务日志必须用 Info/Warn/Error/Debug。
 package brickly
@@ -21,6 +23,7 @@ import (
 
 	"context"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc/metadata"
 
 	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
@@ -128,39 +131,28 @@ func (p *Runtime) OnShutdown(fn ShutdownHandler) *Runtime {
 }
 
 // Start 启动 Runtime：必须由 Host 注入 gRPC 环境。
-// 典型用法：main 函数最后一行调用。
-func (p *Runtime) Start() {
+// 缺 endpoint 或 Host 客户端创建失败时返回 error，不把 Runtime 标成已启动。
+// 成功后阻塞，直到 gRPC Runtime 退出。
+func (p *Runtime) Start() error {
 	if !p.started.CompareAndSwap(false, true) {
-		return
+		return nil
 	}
 	if os.Getenv(runtimegrpc.HostEndpointEnv) == "" {
-		p.Error("BRICKLY_HOST_ENDPOINT is required; Runtime 只走 Host gRPC", nil, nil)
 		p.started.Store(false)
-		p.signalDone()
-		return
+		err := NewBppError("PROTOCOL_ERROR", "BRICKLY_HOST_ENDPOINT 未注入；Runtime 只走 Host gRPC")
+		p.Error(err.Error(), err, nil)
+		return err
 	}
 	p.Config = ReadInjectedProfileConfig()
 	if err := p.startGRPC(); err != nil {
 		p.Error("grpc runtime start failed", err, nil)
-		p.signalDone()
+		p.started.Store(false)
+		p.closeHostClients()
+		return err
 	}
 	<-p.done
-	if p.grpcHandle != nil {
-		p.grpcHandle.Close()
-	}
-	if p.grpcResources != nil {
-		_ = p.grpcResources.Close()
-		p.grpcResources = nil
-	}
-	p.clearEventSubs()
-	if p.grpcPlatform != nil {
-		_ = p.grpcPlatform.Close()
-		p.grpcPlatform = nil
-	}
-	if p.grpcStorage != nil {
-		_ = p.grpcStorage.Close()
-		p.grpcStorage = nil
-	}
+	p.closeHostClients()
+	return nil
 }
 
 func (p *Runtime) startGRPC() error {
@@ -168,15 +160,24 @@ func (p *Runtime) startGRPC() error {
 	if err != nil {
 		return err
 	}
-	if client, clientErr := runtimegrpc.NewHostResourceClient(options.HostEndpoint, options.RuntimeToHostToken); clientErr == nil {
-		p.grpcResources = client
+	resource, err := runtimegrpc.NewHostResourceClient(options.HostEndpoint, options.RuntimeToHostToken)
+	if err != nil {
+		return fmt.Errorf("连接 ResourceService 失败: %w", err)
 	}
-	if platform, platformErr := runtimegrpc.NewHostPlatformClient(options.HostEndpoint, options.RuntimeToHostToken); platformErr == nil {
-		p.grpcPlatform = platform
+	platform, err := runtimegrpc.NewHostPlatformClient(options.HostEndpoint, options.RuntimeToHostToken)
+	if err != nil {
+		_ = resource.Close()
+		return fmt.Errorf("连接 PlatformService 失败: %w", err)
 	}
-	if storage, storageErr := runtimegrpc.NewHostBrickStorageClient(options.HostEndpoint, options.RuntimeToHostToken); storageErr == nil {
-		p.grpcStorage = storage
+	storage, err := runtimegrpc.NewHostBrickStorageClient(options.HostEndpoint, options.RuntimeToHostToken)
+	if err != nil {
+		_ = resource.Close()
+		_ = platform.Close()
+		return fmt.Errorf("连接 BrickStorageService 失败: %w", err)
 	}
+	p.grpcResources = resource
+	p.grpcPlatform = platform
+	p.grpcStorage = storage
 	p.mu.RLock()
 	commands := make([]string, 0, len(p.commandHandlers))
 	for commandID := range p.commandHandlers {
@@ -184,7 +185,7 @@ func (p *Runtime) startGRPC() error {
 	}
 	p.mu.RUnlock()
 	options.Commands = commands
-	options.Invoke = func(rpcCtx context.Context, commandID string, input *runtimegrpc.BrickValue, invocationID string) (*runtimegrpc.BrickValue, error) {
+	options.Invoke = func(rpcCtx context.Context, commandID string, input *runtimev1.BrickValue, invocationID string) (*runtimev1.BrickValue, error) {
 		p.mu.RLock()
 		handler, ok := p.commandHandlers[commandID]
 		p.mu.RUnlock()
@@ -227,7 +228,7 @@ func (p *Runtime) startGRPC() error {
 		ctx := newCommandContext(p, requestID, commandID, CommandInvocationContext{Source: "unknown"}, nil, session.Context())
 		p.enterCommand(requestID, ctx.Context())
 		defer p.leaveCommand()
-		ctx.stream = bindInteractStream(session.Send, session.Events())
+		ctx.stream = bindInteractStream(session.Send, session.Events(), session.HandleRequests)
 		result, interactErr := handler(ctx, raw)
 		if interactErr != nil {
 			return nil, interactErr
@@ -256,6 +257,26 @@ func (p *Runtime) startGRPC() error {
 		}()
 	}
 	return nil
+}
+
+func (p *Runtime) closeHostClients() {
+	if p.grpcHandle != nil {
+		p.grpcHandle.Close()
+		p.grpcHandle = nil
+	}
+	if p.grpcResources != nil {
+		_ = p.grpcResources.Close()
+		p.grpcResources = nil
+	}
+	p.clearEventSubs()
+	if p.grpcPlatform != nil {
+		_ = p.grpcPlatform.Close()
+		p.grpcPlatform = nil
+	}
+	if p.grpcStorage != nil {
+		_ = p.grpcStorage.Close()
+		p.grpcStorage = nil
+	}
 }
 
 // Invoke 再跑自己的一条命令。已有占用则不 Dispose。没有当前命令时是 root。
@@ -614,8 +635,7 @@ func (p *Runtime) handleEventNotify(msg rawMessage) {
 	// 路由 window.* 事件到具体 WindowHandle
 	if strings.HasPrefix(event, "window.") {
 		if m, ok := payloadRaw.(map[string]any); ok {
-			if widF, ok := m["windowId"].(float64); ok {
-				wid := int64(widF)
+			if wid, ok := windowIDFromPayload(m); ok {
 				p.windowsMu.RLock()
 				handle := p.windows[wid]
 				p.windowsMu.RUnlock()
@@ -676,6 +696,10 @@ func (p *Runtime) rememberTerminalWindowEvent(eventID string) bool {
 		delete(p.terminalWindowEventIDs, oldest)
 	}
 	return true
+}
+
+func windowIDFromPayload(payload map[string]any) (int64, bool) {
+	return resourceInt64(payload["windowId"])
 }
 
 // —— 小工具 ——

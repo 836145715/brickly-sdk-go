@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 )
 
 const MaxResourceMaterializationBytes int64 = 200 * 1024 * 1024
@@ -51,7 +52,11 @@ func (p *Runtime) CreateResource(content any, options *ResourceCreateOptions) (*
 	return p.createResource(content, options, "")
 }
 
-func (p *Runtime) createResource(content any, options *ResourceCreateOptions, _ string) (*ResourceHandle, error) {
+func (p *Runtime) CreateResourceFrom(reader io.Reader, options *ResourceCreateOptions) (*ResourceHandle, error) {
+	return p.createResourceFrom(reader, options, "")
+}
+
+func (p *Runtime) createResource(content any, options *ResourceCreateOptions, requestID string) (*ResourceHandle, error) {
 	defaultMime := ""
 	switch content.(type) {
 	case string:
@@ -61,91 +66,97 @@ func (p *Runtime) createResource(content any, options *ResourceCreateOptions, _ 
 	default:
 		return nil, NewBppError("INVALID_INPUT", "资源内容必须是 string 或 []byte。")
 	}
-	if p.grpcResources != nil {
-		var data []byte
-		switch value := content.(type) {
-		case string:
-			data = []byte(value)
-		case []byte:
-			data = value
+	resolved := resolveResourceCreateOptions(options, defaultMime)
+	switch value := content.(type) {
+	case string:
+		if len(value) > resourceUploadChunkBytes {
+			return p.writeAllString(value, resolved, requestID)
 		}
-		name, mediaType := "", defaultMime
-		var ttlMs int64
-		if options != nil {
-			if options.Name != "" {
-				name = options.Name
-			}
-			if options.MimeType != "" {
-				mediaType = options.MimeType
-			}
-			ttlMs = options.TTLMillis
+		return p.createBytes([]byte(value), resolved, requestID)
+	case []byte:
+		if len(value) > resourceUploadChunkBytes {
+			return p.writeAllBytes(value, resolved, requestID)
 		}
-		_ = ttlMs
-		proto, err := p.grpcResources.Create(context.Background(), data, name, mediaType)
-		if err != nil {
-			return nil, err
-		}
-		return newGrpcResourceHandle(p.grpcResources, protoToSDKResourceRef(proto)), nil
+		return p.createBytes(value, resolved, requestID)
+	default:
+		return nil, NewBppError("INVALID_INPUT", "资源内容必须是 string 或 []byte。")
 	}
-	return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 }
 
-func (p *Runtime) CreateResourceFrom(reader io.Reader, options *ResourceCreateOptions) (handle *ResourceHandle, err error) {
-	return p.createResourceFrom(reader, options, "")
+func (p *Runtime) createBytes(data []byte, options *ResourceCreateOptions, requestID string) (*ResourceHandle, error) {
+	if p.grpcResources == nil {
+		return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
+	}
+	name, mediaType := "", "application/octet-stream"
+	if options != nil {
+		name = options.Name
+		if options.MimeType != "" {
+			mediaType = options.MimeType
+		}
+	}
+	proto, err := p.grpcResources.Create(p.resourceContext(requestID), data, name, mediaType)
+	if err != nil {
+		return nil, err
+	}
+	return newGrpcResourceHandle(p.grpcResources, protoToSDKResourceRef(proto)), nil
 }
 
-func (p *Runtime) createResourceFrom(reader io.Reader, options *ResourceCreateOptions, _ string) (*ResourceHandle, error) {
+func (p *Runtime) writeAllString(value string, options *ResourceCreateOptions, requestID string) (*ResourceHandle, error) {
+	writer, err := p.createResourceWriter(options, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.WriteString(value); err != nil {
+		_ = writer.Abort()
+		return nil, err
+	}
+	return writer.Finish()
+}
+
+func (p *Runtime) writeAllBytes(data []byte, options *ResourceCreateOptions, requestID string) (*ResourceHandle, error) {
+	writer, err := p.createResourceWriter(options, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(data); err != nil {
+		_ = writer.Abort()
+		return nil, err
+	}
+	return writer.Finish()
+}
+
+func resolveResourceCreateOptions(options *ResourceCreateOptions, defaultMime string) *ResourceCreateOptions {
+	resolved := ResourceCreateOptions{MimeType: defaultMime}
+	if options != nil {
+		resolved = *options
+		if resolved.MimeType == "" {
+			resolved.MimeType = defaultMime
+		}
+	}
+	return &resolved
+}
+
+func (p *Runtime) createResourceFrom(reader io.Reader, options *ResourceCreateOptions, requestID string) (*ResourceHandle, error) {
 	if reader == nil {
 		return nil, NewBppError("INVALID_INPUT", "资源流 reader 不能为空。")
 	}
 	if options != nil && options.ExpectedSizeBytes < 0 {
 		return nil, NewBppError("INVALID_INPUT", "ExpectedSizeBytes 必须是非负整数。")
 	}
-	limited := io.LimitReader(reader, MaxResourceMaterializationBytes+1)
-	data, err := io.ReadAll(limited)
+	writer, err := p.createResourceWriter(resolveResourceCreateOptions(options, "application/octet-stream"), requestID)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > MaxResourceMaterializationBytes {
-		return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源超过 200 MiB，不能整体读取。请使用流读取。")
+	if _, err := writer.ReadFrom(reader); err != nil {
+		_ = writer.Abort()
+		return nil, err
 	}
-	return p.createResource(data, options, "")
+	return writer.Finish()
 }
 
-// CreateResourceWriter 创建资源写入器。当前 Host 只支持一次性 Create，Writer 尚未接通。
 func (p *Runtime) CreateResourceWriter(options *ResourceCreateOptions) (*ResourceWriter, error) {
 	return p.createResourceWriter(options, "")
 }
-
-func (p *Runtime) createResourceWriter(_ *ResourceCreateOptions, _ string) (*ResourceWriter, error) {
-	return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
-}
-
-// ResourceWriter 是公开写入面；当前尚未接通 ResourceService。
-type ResourceWriter struct{}
-
-func (w *ResourceWriter) Write([]byte) (int, error) {
-	return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
-}
-
-func (w *ResourceWriter) WriteString(string) (int, error) {
-	return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
-}
-
-func (w *ResourceWriter) ReadFrom(io.Reader) (int64, error) {
-	return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
-}
-
-func (w *ResourceWriter) Finish() (*ResourceHandle, error) {
-	return nil, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
-}
-
-func (w *ResourceWriter) Abort() error {
-	return nil
-}
-
-var _ io.Writer = (*ResourceWriter)(nil)
-var _ io.ReaderFrom = (*ResourceWriter)(nil)
 
 func isBareResourceRef(ref map[string]any) bool {
 	allowed := map[string]bool{
@@ -423,16 +434,18 @@ func hasJSONOption(options []string, expected string) bool {
 	return false
 }
 
-// ResourceHandle 提供 io.ReadCloser 资源读取；有 ResourceService 时一次物化后再按缓冲读。
+// ResourceHandle 提供 io.ReadCloser 资源读取。
 type ResourceHandle struct {
-	Ref     ResourceRef
-	grpc    *runtimegrpc.HostResourceClient
-	mu      sync.Mutex
-	body    []byte
-	offset  int
-	loaded  bool
-	closed  bool
-	revoked bool
+	Ref      ResourceRef
+	grpc     *runtimegrpc.HostResourceClient
+	mu       sync.Mutex
+	stream   runtimev1.ResourceService_ReadClient
+	cancel   context.CancelFunc
+	chunk    []byte
+	chunkOff int
+	closed   bool
+	revoked  bool
+	eof      bool
 }
 
 func newResourceHandle(ref ResourceRef) *ResourceHandle {
@@ -485,7 +498,7 @@ func hydrateGrpcResourceValue(value any, client *runtimegrpc.HostResourceClient,
 	return value
 }
 
-func protoToSDKResourceRef(ref *runtimegrpc.ResourceRef) ResourceRef {
+func protoToSDKResourceRef(ref *runtimev1.ResourceRef) ResourceRef {
 	expiresAt := int64(0)
 	if ref.GetExpiresAt() != nil {
 		expiresAt = ref.GetExpiresAt().AsTime().UnixMilli()
@@ -528,6 +541,34 @@ func (h *ResourceHandle) Bytes() ([]byte, error) {
 	return h.readAll()
 }
 
+func (h *ResourceHandle) readAll() ([]byte, error) {
+	if h.Ref.SizeBytes > MaxResourceMaterializationBytes {
+		return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源超过 200 MiB，不能整体读取。请使用流读取。")
+	}
+	if h.grpc != nil {
+		return h.grpc.Read(context.Background(), h.Ref.ResourceID)
+	}
+	var result bytes.Buffer
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := h.Read(buf)
+		if n > 0 {
+			result.Write(buf[:n])
+		}
+		if result.Len() > int(MaxResourceMaterializationBytes) {
+			_ = h.Close()
+			return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源整体读取超过 200 MiB。")
+		}
+		if err == io.EOF {
+			return result.Bytes(), nil
+		}
+		if err != nil {
+			_ = h.Close()
+			return nil, err
+		}
+	}
+}
+
 func (h *ResourceHandle) Text() (string, error) {
 	data, err := h.readAll()
 	if err != nil {
@@ -564,34 +605,6 @@ func (h *ResourceHandle) SaveTo(path string) error {
 	return err
 }
 
-func (h *ResourceHandle) readAll() ([]byte, error) {
-	if h.grpc != nil {
-		return h.grpc.Read(context.Background(), h.Ref.ResourceID)
-	}
-	if h.Ref.SizeBytes > MaxResourceMaterializationBytes {
-		return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源超过 200 MiB，不能整体读取。请使用流读取。")
-	}
-	var result bytes.Buffer
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := h.Read(buf)
-		if n > 0 {
-			result.Write(buf[:n])
-		}
-		if result.Len() > int(MaxResourceMaterializationBytes) {
-			_ = h.Close()
-			return nil, NewBppError("RESOURCE_MATERIALIZATION_TOO_LARGE", "资源整体读取超过 200 MiB。")
-		}
-		if err == io.EOF {
-			return result.Bytes(), nil
-		}
-		if err != nil {
-			_ = h.Close()
-			return nil, err
-		}
-	}
-}
-
 func (h *ResourceHandle) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -601,40 +614,58 @@ func (h *ResourceHandle) Read(p []byte) (int, error) {
 	if h.revoked {
 		return 0, NewBppError("RESOURCE_EXPIRED", "资源已撤销")
 	}
-	if h.closed {
+	if h.closed || h.eof {
 		return 0, io.EOF
-	}
-	if err := h.ensureBodyLocked(); err != nil {
-		return 0, err
-	}
-	if h.offset >= len(h.body) {
-		return 0, io.EOF
-	}
-	n := copy(p, h.body[h.offset:])
-	h.offset += n
-	return n, nil
-}
-
-func (h *ResourceHandle) ensureBodyLocked() error {
-	if h.loaded {
-		return nil
 	}
 	if h.grpc == nil {
-		return NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
+		return 0, NewBppError("PROTOCOL_ERROR", "ResourceService 未就绪")
 	}
-	data, err := h.grpc.Read(context.Background(), h.Ref.ResourceID)
+	if err := h.ensureStreamLocked(); err != nil {
+		return 0, err
+	}
+	for {
+		if h.chunkOff < len(h.chunk) {
+			n := copy(p, h.chunk[h.chunkOff:])
+			h.chunkOff += n
+			return n, nil
+		}
+		msg, err := h.stream.Recv()
+		if err == io.EOF {
+			h.eof = true
+			return 0, io.EOF
+		}
+		if err != nil {
+			return 0, err
+		}
+		h.chunk = msg.GetData()
+		h.chunkOff = 0
+	}
+}
+
+func (h *ResourceHandle) ensureStreamLocked() error {
+	if h.stream != nil {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := h.grpc.OpenRead(ctx, h.Ref.ResourceID)
 	if err != nil {
+		cancel()
 		return err
 	}
-	h.body = data
-	h.loaded = true
+	h.cancel = cancel
+	h.stream = stream
 	return nil
 }
 
 func (h *ResourceHandle) Close() error {
 	h.mu.Lock()
 	h.closed = true
-	h.body = nil
+	h.chunk = nil
+	if h.cancel != nil {
+		h.cancel()
+		h.cancel = nil
+	}
+	h.stream = nil
 	h.mu.Unlock()
 	return nil
 }

@@ -8,29 +8,60 @@ import (
 	"sync"
 	"time"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc/metadata"
 )
 
 type interactStream interface {
-	Send(*ClientFrame) error
-	Recv() (*ServerFrame, error)
+	Send(*runtimev1.ClientFrame) error
+	Recv() (*runtimev1.ServerFrame, error)
 	CloseSend() error
 }
 
+type requestLifecycle string
+
+const (
+	requestQueued    requestLifecycle = "queued"
+	requestSent      requestLifecycle = "sent"
+	requestSettled   requestLifecycle = "settled"
+	requestCancelled requestLifecycle = "cancelled"
+)
+
+type outboundItem struct {
+	key   string
+	frame *runtimev1.ClientFrame
+	done  chan error
+}
+
+type pendingRequest struct {
+	state     requestLifecycle
+	messageID []byte
+	reply     chan resultOrError
+}
+
+var errSessionClosed = fmt.Errorf("SESSION_CLOSED: interaction 已取消")
+
 // ConnectorInteraction 是 Runtime → Host Connector.Interact 的客户端会话。
 type ConnectorInteraction struct {
-	stream   interactStream
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	outbound uint64
-	inbound  uint64
-	events   chan any
-	done     chan struct{}
-	result   any
-	err      error
-	pending     map[string]chan resultOrError
-	closed      bool
-	inputClosed bool
+	stream        interactStream
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	cond          *sync.Cond
+	outbound      uint64
+	inbound       uint64
+	events        chan any
+	done          chan struct{}
+	result        any
+	err           error
+	pending       map[string]*pendingRequest
+	closed        bool
+	peerFinal     bool
+	inputClosed   bool
+	outq          []outboundItem
+	writerStop    bool
+	writerOnce    sync.Once
+	writerDone    chan struct{}
+	writerStarted bool
 }
 
 func (c *HostPlatformClient) Interact(ctx context.Context, brickID, commandID string, input any, invocationID string, intent ...string) (*ConnectorInteraction, error) {
@@ -61,18 +92,13 @@ func (c *HostPlatformClient) PlatformInteract(ctx context.Context, commandID str
 		cancel()
 		return nil, err
 	}
-	session := &ConnectorInteraction{
-		stream:  stream,
-		cancel:  cancel,
-		events:  make(chan any, 256),
-		done:    make(chan struct{}),
-		pending: make(map[string]chan resultOrError),
-	}
+	session := newConnectorInteraction(stream, cancel)
 	if err := session.open(commandID, value); err != nil {
 		cancel()
 		_ = stream.CloseSend()
 		return nil, err
 	}
+	session.startWriter()
 	go session.readLoop()
 	return session, nil
 }
@@ -101,24 +127,32 @@ func (c *HostPlatformClient) interact(ctx context.Context, brickID, commandID st
 		cancel()
 		return nil, err
 	}
-	session := &ConnectorInteraction{
-		stream:  stream,
-		cancel:  cancel,
-		events:  make(chan any, 256),
-		done:    make(chan struct{}),
-		pending: make(map[string]chan resultOrError),
-	}
+	session := newConnectorInteraction(stream, cancel)
 	if err := session.open(commandID, value); err != nil {
 		cancel()
 		_ = stream.CloseSend()
 		return nil, err
 	}
+	session.startWriter()
 	go session.readLoop()
 	return session, nil
 }
 
-func (s *ConnectorInteraction) open(commandID string, input *BrickValue) error {
-	if err := s.write(&ClientFrame{Body: &ClientFrame_Open{Open: &OpenFrame{CommandId: commandID, Input: input}}}); err != nil {
+func newConnectorInteraction(stream interactStream, cancel context.CancelFunc) *ConnectorInteraction {
+	session := &ConnectorInteraction{
+		stream:     stream,
+		cancel:     cancel,
+		events:     make(chan any, 256),
+		done:       make(chan struct{}),
+		pending:    make(map[string]*pendingRequest),
+		writerDone: make(chan struct{}),
+	}
+	session.cond = sync.NewCond(&session.mu)
+	return session
+}
+
+func (s *ConnectorInteraction) open(commandID string, input *runtimev1.BrickValue) error {
+	if err := s.write(&runtimev1.ClientFrame{Body: &runtimev1.ClientFrame_Open{Open: &runtimev1.OpenFrame{CommandId: commandID, Input: input}}}); err != nil {
 		return err
 	}
 	frame, err := s.stream.Recv()
@@ -140,15 +174,36 @@ func (s *ConnectorInteraction) Send(ctx context.Context, event any) error {
 	if err != nil {
 		return err
 	}
-	return s.write(&ClientFrame{Body: &ClientFrame_Event{Event: &EventFrame{Payload: value}}})
+	done := make(chan error, 1)
+	if err := s.enqueue(outboundItem{
+		frame: &runtimev1.ClientFrame{Body: &runtimev1.ClientFrame_Event{Event: &runtimev1.EventFrame{Payload: value}}},
+		done:  done,
+	}); err != nil {
+		return err
+	}
+	return <-done
 }
 
-func (s *ConnectorInteraction) SendLatest(ctx context.Context, _ string, event any) error {
-	return s.Send(ctx, event)
+func (s *ConnectorInteraction) SendLatest(ctx context.Context, key string, event any) error {
+	if err := s.assertWritable(); err != nil {
+		return err
+	}
+	value, err := AnyToBrickValue(event)
+	if err != nil {
+		return err
+	}
+	return s.enqueue(outboundItem{
+		key:   key,
+		frame: &runtimev1.ClientFrame{Body: &runtimev1.ClientFrame_Event{Event: &runtimev1.EventFrame{Payload: value}}},
+	})
 }
 
+// Request 等这一条回复。取消 ctx 只停这一条（写 cancel_request），等同 Node pending.cancel()。
 func (s *ConnectorInteraction) Request(ctx context.Context, request any) (any, error) {
 	if err := s.assertWritable(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	value, err := AnyToBrickValue(request)
@@ -157,27 +212,44 @@ func (s *ConnectorInteraction) Request(ctx context.Context, request any) (any, e
 	}
 	id := randomMessageID()
 	reply := make(chan resultOrError, 1)
+	entry := &pendingRequest{state: requestQueued, messageID: id, reply: reply}
 	s.mu.Lock()
-	s.pending[string(id)] = reply
+	if s.inputClosed || s.err != nil || s.closed {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("interaction 已不能发送")
+	}
+	s.pending[string(id)] = entry
 	s.mu.Unlock()
-	if err := s.write(&ClientFrame{
-		Header: &FrameHeader{MessageId: id},
-		Body:   &ClientFrame_Request{Request: &RequestFrame{Payload: value}},
+	sent := make(chan error, 1)
+	if err := s.enqueue(outboundItem{
+		frame: &runtimev1.ClientFrame{
+			Header: &runtimev1.FrameHeader{MessageId: id},
+			Body:   &runtimev1.ClientFrame_Request{Request: &runtimev1.RequestFrame{Payload: value}},
+		},
+		done: sent,
 	}); err != nil {
 		s.mu.Lock()
-		delete(s.pending, string(id))
+		s.finishPendingLocked(entry, err)
 		s.mu.Unlock()
 		return nil, err
 	}
 	select {
 	case <-ctx.Done():
-		s.mu.Lock()
-		delete(s.pending, string(id))
-		s.mu.Unlock()
-		_ = s.write(&ClientFrame{
-			Header: &FrameHeader{MessageId: id},
-			Body:   &ClientFrame_CancelRequest{CancelRequest: &CancelRequestFrame{}},
-		})
+		s.cancelPending(entry, ctx.Err())
+		return nil, ctx.Err()
+	case err := <-sent:
+		if err != nil {
+			s.mu.Lock()
+			s.finishPendingLocked(entry, err)
+			s.mu.Unlock()
+			return nil, err
+		}
+	case outcome := <-reply:
+		return outcome.result, outcome.err
+	}
+	select {
+	case <-ctx.Done():
+		s.cancelPending(entry, ctx.Err())
 		return nil, ctx.Err()
 	case outcome := <-reply:
 		return outcome.result, outcome.err
@@ -222,8 +294,17 @@ func (s *ConnectorInteraction) CloseInput(ctx context.Context) error {
 		s.mu.Unlock()
 		return nil
 	}
+	s.settleOpenRequestsLocked(!s.peerFinal)
 	s.inputClosed = true
+	s.writerStop = true
+	started := s.writerStarted
+	if s.cond != nil {
+		s.cond.Broadcast()
+	}
 	s.mu.Unlock()
+	if started {
+		<-s.writerDone
+	}
 	return s.stream.CloseSend()
 }
 
@@ -250,15 +331,102 @@ func (s *ConnectorInteraction) assertWritable() error {
 	return nil
 }
 
-func (s *ConnectorInteraction) write(frame *ClientFrame) error {
+func (s *ConnectorInteraction) write(frame *runtimev1.ClientFrame) error {
 	s.mu.Lock()
-	s.outbound++
-	if frame.Header == nil {
-		frame.Header = &FrameHeader{}
-	}
-	frame.Header.Sequence = s.outbound
+	s.assignSequenceLocked(frame)
 	s.mu.Unlock()
 	return s.stream.Send(frame)
+}
+
+func (s *ConnectorInteraction) assignSequenceLocked(frame *runtimev1.ClientFrame) {
+	s.outbound++
+	if frame.Header == nil {
+		frame.Header = &runtimev1.FrameHeader{}
+	}
+	frame.Header.Sequence = s.outbound
+}
+
+func (s *ConnectorInteraction) startWriter() {
+	s.writerOnce.Do(func() {
+		if s.cond == nil {
+			s.cond = sync.NewCond(&s.mu)
+		}
+		if s.writerDone == nil {
+			s.writerDone = make(chan struct{})
+		}
+		s.mu.Lock()
+		s.writerStarted = true
+		s.mu.Unlock()
+		go s.writerLoop()
+	})
+}
+
+func (s *ConnectorInteraction) enqueue(item outboundItem) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inputClosed || s.err != nil || s.closed {
+		return fmt.Errorf("interaction 已不能发送")
+	}
+	if item.key != "" {
+		for i, existing := range s.outq {
+			if existing.key == item.key {
+				s.outq[i] = item
+				if s.cond != nil {
+					s.cond.Signal()
+				}
+				return nil
+			}
+		}
+	}
+	s.outq = append(s.outq, item)
+	if s.cond != nil {
+		s.cond.Signal()
+	}
+	return nil
+}
+
+func (s *ConnectorInteraction) writerLoop() {
+	defer close(s.writerDone)
+	for {
+		s.mu.Lock()
+		for len(s.outq) == 0 && !s.writerStop {
+			s.cond.Wait()
+		}
+		if len(s.outq) == 0 && s.writerStop {
+			s.mu.Unlock()
+			return
+		}
+		item := s.outq[0]
+		s.outq = s.outq[1:]
+		if item.frame != nil && item.frame.GetRequest() != nil {
+			key := ""
+			if item.frame.GetHeader() != nil {
+				key = string(item.frame.GetHeader().GetMessageId())
+			}
+			entry := s.pending[key]
+			if entry == nil || entry.state != requestQueued {
+				s.mu.Unlock()
+				if item.done != nil {
+					item.done <- nil
+				}
+				continue
+			}
+			entry.state = requestSent
+		}
+		s.assignSequenceLocked(item.frame)
+		err := s.stream.Send(item.frame)
+		s.mu.Unlock()
+		if err != nil {
+			if item.done != nil {
+				item.done <- err
+			}
+			s.fail(err)
+			return
+		}
+		if item.done != nil {
+			item.done <- nil
+		}
+	}
 }
 
 func (s *ConnectorInteraction) readLoop() {
@@ -289,29 +457,34 @@ func (s *ConnectorInteraction) readLoop() {
 			continue
 		}
 		if final := frame.GetFinal(); final != nil {
+			s.mu.Lock()
+			s.peerFinal = true
+			s.settleOpenRequestsLocked(false)
+			s.mu.Unlock()
 			s.result = brickValueToAny(final.GetResult())
 			return
 		}
 	}
 }
 
-func (s *ConnectorInteraction) onResponse(frame *ServerFrame, response *ResponseFrame) {
+func (s *ConnectorInteraction) onResponse(frame *runtimev1.ServerFrame, response *runtimev1.ResponseFrame) {
 	key := ""
 	if frame.GetHeader() != nil {
 		key = string(frame.GetHeader().GetReplyTo())
 	}
 	s.mu.Lock()
-	reply := s.pending[key]
-	delete(s.pending, key)
-	s.mu.Unlock()
-	if reply == nil {
+	entry := s.pending[key]
+	if entry == nil || entry.state != requestSent {
+		s.mu.Unlock()
 		return
 	}
 	if err := response.GetError(); err != nil {
-		reply <- resultOrError{err: fmt.Errorf("%s", err.GetMessage())}
+		s.finishPendingLocked(entry, fmt.Errorf("%s", err.GetMessage()))
+		s.mu.Unlock()
 		return
 	}
-	reply <- resultOrError{result: brickValueToAny(response.GetValue())}
+	s.finishPendingLocked(entry, nil, brickValueToAny(response.GetValue()))
+	s.mu.Unlock()
 }
 
 func (s *ConnectorInteraction) push(event any) {
@@ -323,13 +496,32 @@ func (s *ConnectorInteraction) push(event any) {
 
 func (s *ConnectorInteraction) fail(err error) {
 	s.mu.Lock()
-	already := s.err != nil
-	if !already {
-		s.err = err
+	if s.err != nil {
+		s.mu.Unlock()
+		return
+	}
+	s.err = err
+	for _, entry := range s.pending {
+		if entry.state == requestSent && !s.peerFinal {
+			frame := cancelRequestFrame(entry.messageID)
+			s.assignSequenceLocked(frame)
+			_ = s.stream.Send(frame)
+		} else if entry.state == requestQueued {
+			s.removeQueuedRequestLocked(string(entry.messageID))
+		}
+		s.finishPendingLocked(entry, errSessionClosed)
+	}
+	leftover := s.outq
+	s.outq = nil
+	s.writerStop = true
+	if s.cond != nil {
+		s.cond.Broadcast()
 	}
 	s.mu.Unlock()
-	if already {
-		return
+	for _, item := range leftover {
+		if item.done != nil {
+			item.done <- errSessionClosed
+		}
 	}
 	if s.cancel != nil {
 		s.cancel()
@@ -343,13 +535,94 @@ func (s *ConnectorInteraction) finish() {
 		return
 	}
 	s.closed = true
+	s.settleOpenRequestsLocked(false)
 	close(s.events)
 	close(s.done)
-	for _, reply := range s.pending {
-		reply <- resultOrError{err: s.err}
-	}
-	s.pending = nil
 	s.mu.Unlock()
+}
+
+func (s *ConnectorInteraction) cancelPending(entry *pendingRequest, err error) {
+	done := make(chan error, 1)
+	s.mu.Lock()
+	wait := s.cancelEntryLocked(entry, err, true, done)
+	s.mu.Unlock()
+	if !wait {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+	}
+}
+
+func (s *ConnectorInteraction) settleOpenRequestsLocked(writeCancel bool) {
+	for _, entry := range s.pending {
+		s.cancelEntryLocked(entry, errSessionClosed, writeCancel, nil)
+	}
+}
+
+func (s *ConnectorInteraction) cancelEntryLocked(entry *pendingRequest, err error, writeCancel bool, done chan error) bool {
+	if entry.state == requestSettled || entry.state == requestCancelled {
+		return false
+	}
+	previous := entry.state
+	s.finishPendingLocked(entry, err)
+	if previous == requestQueued {
+		s.removeQueuedRequestLocked(string(entry.messageID))
+		return false
+	}
+	if previous == requestSent && writeCancel && !s.peerFinal && s.err == nil {
+		s.outq = append(s.outq, outboundItem{
+			frame: cancelRequestFrame(entry.messageID),
+			done:  done,
+		})
+		if s.cond != nil {
+			s.cond.Signal()
+		}
+		return done != nil
+	}
+	return false
+}
+
+func (s *ConnectorInteraction) finishPendingLocked(entry *pendingRequest, err error, value ...any) {
+	if entry.state == requestSettled || entry.state == requestCancelled {
+		return
+	}
+	if err != nil {
+		entry.state = requestCancelled
+	} else {
+		entry.state = requestSettled
+	}
+	delete(s.pending, string(entry.messageID))
+	var result any
+	if len(value) > 0 {
+		result = value[0]
+	}
+	select {
+	case entry.reply <- resultOrError{result: result, err: err}:
+	default:
+	}
+}
+
+func (s *ConnectorInteraction) removeQueuedRequestLocked(id string) bool {
+	for i, item := range s.outq {
+		if item.frame == nil || item.frame.GetRequest() == nil {
+			continue
+		}
+		if item.frame.GetHeader() == nil || string(item.frame.GetHeader().GetMessageId()) != id {
+			continue
+		}
+		s.outq = append(s.outq[:i], s.outq[i+1:]...)
+		return true
+	}
+	return false
+}
+
+func cancelRequestFrame(messageID []byte) *runtimev1.ClientFrame {
+	return &runtimev1.ClientFrame{
+		Header: &runtimev1.FrameHeader{MessageId: messageID},
+		Body:   &runtimev1.ClientFrame_CancelRequest{CancelRequest: &runtimev1.CancelRequestFrame{}},
+	}
 }
 
 func randomMessageID() []byte {

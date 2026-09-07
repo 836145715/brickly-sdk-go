@@ -23,11 +23,11 @@ type StartToolOptions struct {
 type ToolLifetimeHost interface {
 	Start(ctx context.Context, tool BrickRef, options StartToolOptions) (handleID string, err error)
 	Invoke(ctx context.Context, handleID, commandID string, input any) (any, error)
-	Interact(ctx context.Context, handleID, commandID string, input any) (any, error)
+	Interact(ctx context.Context, handleID, commandID string, input any, opts ...InteractOptions) (Interaction, error)
 	Dispose(ctx context.Context, handleID string) error
 	Stop(ctx context.Context, handleID string) error
 	InvokeOnce(ctx context.Context, tool BrickRef, commandID string, input any) (any, error)
-	InteractOnce(ctx context.Context, tool BrickRef, commandID string, input any) (any, error)
+	InteractOnce(ctx context.Context, tool BrickRef, commandID string, input any, opts ...InteractOptions) (Interaction, error)
 }
 
 // ToolHandle 是调用方持有的长期所有权。不暴露 lifetimeId / retainer。
@@ -45,12 +45,29 @@ func (h *ToolHandle) Invoke(ctx context.Context, commandID string, input any) (a
 	return h.host.Invoke(ctx, h.id, commandID, input)
 }
 
-// Interact 在 Handle 仍然 active 时发起交互会话。
-func (h *ToolHandle) Interact(ctx context.Context, commandID string, input any) (any, error) {
+// Interact 在 Handle 仍然 active 时发起交互会话。必须传入 OnEvent；拿整段结果走 End()。
+func (h *ToolHandle) Interact(ctx context.Context, commandID string, input any, opts ...InteractOptions) (Interaction, error) {
 	if err := h.assertCallable(); err != nil {
 		return nil, err
 	}
-	return h.host.Interact(ctx, h.id, commandID, input)
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := h.host.Interact(ctx, h.id, commandID, input, options)
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
+}
+
+// Call 是 interact + 立刻 End 的糖。必须传入 OnEvent。
+func (h *ToolHandle) Call(ctx context.Context, commandID string, input any, opts ...CallOptions) (any, error) {
+	if err := h.assertCallable(); err != nil {
+		return nil, err
+	}
+	return Call(ctx, toolHandleClient{h}, commandID, input, opts...)
 }
 
 // Dispose 释放 Handle 所有权，不取消在途 Call。
@@ -128,7 +145,26 @@ func (s *ToolSdk) Invoke(ctx context.Context, tool BrickRef, commandID string, i
 	return s.host.InvokeOnce(ctx, tool, commandID, input)
 }
 
-// Interact 是无 Handle 的一次性交互。
-func (s *ToolSdk) Interact(ctx context.Context, tool BrickRef, commandID string, input any) (any, error) {
-	return s.host.InteractOnce(ctx, tool, commandID, input)
+// Interact 是无 Handle 的一次性交互会话。必须传入 OnEvent。
+func (s *ToolSdk) Interact(ctx context.Context, tool BrickRef, commandID string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	session, err := s.host.InteractOnce(ctx, tool, commandID, input, options)
+	if err != nil {
+		return nil, err
+	}
+	pumpSessionEvents(session, options.OnEvent)
+	return session, nil
+}
+
+type toolHandleClient struct{ handle *ToolHandle }
+
+func (c toolHandleClient) Invoke(ctx context.Context, command string, input any) (any, error) {
+	return c.handle.Invoke(ctx, command, input)
+}
+
+func (c toolHandleClient) Interact(ctx context.Context, command string, input any, opts ...InteractOptions) (Interaction, error) {
+	return c.handle.Interact(ctx, command, input, opts...)
 }

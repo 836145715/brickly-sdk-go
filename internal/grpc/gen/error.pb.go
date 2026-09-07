@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: error.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -1136,9 +1136,9 @@ const file_error_proto_rawDesc = "" +
 	"\x0fobserved_offset\x18\x02 \x01(\x04R\x0eobservedOffset\"e\n" +
 	"\x1dResourceIntegrityFailedDetail\x12,\n" +
 	"\x12resource_id_prefix\x18\x01 \x01(\tR\x10resourceIdPrefix\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reasonB\xc1\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reasonB\xcf\x01\n" +
 	"\x16com.brickly.runtime.v1B\n" +
-	"ErrorProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"ErrorProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_error_proto_rawDescOnce sync.Once

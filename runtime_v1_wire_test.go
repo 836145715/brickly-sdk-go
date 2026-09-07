@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc"
-
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )

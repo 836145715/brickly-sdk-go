@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -12,7 +13,7 @@ import (
 
 type HostBrickStorageClient struct {
 	conn    *grpc.ClientConn
-	storage BrickStorageServiceClient
+	storage runtimev1.BrickStorageServiceClient
 	token   string
 }
 
@@ -30,13 +31,13 @@ func NewHostBrickStorageClient(endpoint, runtimeToHostToken string) (*HostBrickS
 	}
 	return &HostBrickStorageClient{
 		conn:    conn,
-		storage: NewBrickStorageServiceClient(conn),
+		storage: runtimev1.NewBrickStorageServiceClient(conn),
 		token:   runtimeToHostToken,
 	}, nil
 }
 
 func (c *HostBrickStorageClient) KvGet(ctx context.Context, scope, key string) (any, bool, error) {
-	response, err := c.storage.KvGet(c.withToken(ctx), &BrickStorageKvGetRequest{
+	response, err := c.storage.KvGet(c.withToken(ctx), &runtimev1.BrickStorageKvGetRequest{
 		Scope: toStorageScope(scope),
 		Key:   key,
 	})
@@ -58,7 +59,7 @@ func (c *HostBrickStorageClient) KvSet(ctx context.Context, scope, key string, v
 	if err != nil {
 		return err
 	}
-	_, err = c.storage.KvSet(c.withToken(ctx), &BrickStorageKvSetRequest{
+	_, err = c.storage.KvSet(c.withToken(ctx), &runtimev1.BrickStorageKvSetRequest{
 		Scope: toStorageScope(scope),
 		Key:   key,
 		Value: brickValue,
@@ -67,7 +68,7 @@ func (c *HostBrickStorageClient) KvSet(ctx context.Context, scope, key string, v
 }
 
 func (c *HostBrickStorageClient) KvDelete(ctx context.Context, scope, key string) (bool, error) {
-	response, err := c.storage.KvDelete(c.withToken(ctx), &BrickStorageKvKeyRequest{
+	response, err := c.storage.KvDelete(c.withToken(ctx), &runtimev1.BrickStorageKvKeyRequest{
 		Scope: toStorageScope(scope),
 		Key:   key,
 	})
@@ -78,7 +79,7 @@ func (c *HostBrickStorageClient) KvDelete(ctx context.Context, scope, key string
 }
 
 func (c *HostBrickStorageClient) KvHas(ctx context.Context, scope, key string) (bool, error) {
-	response, err := c.storage.KvHas(c.withToken(ctx), &BrickStorageKvKeyRequest{
+	response, err := c.storage.KvHas(c.withToken(ctx), &runtimev1.BrickStorageKvKeyRequest{
 		Scope: toStorageScope(scope),
 		Key:   key,
 	})
@@ -89,7 +90,7 @@ func (c *HostBrickStorageClient) KvHas(ctx context.Context, scope, key string) (
 }
 
 func (c *HostBrickStorageClient) KvList(ctx context.Context, scope, prefix string) ([]string, error) {
-	response, err := c.storage.KvList(c.withToken(ctx), &BrickStorageKvListRequest{
+	response, err := c.storage.KvList(c.withToken(ctx), &runtimev1.BrickStorageKvListRequest{
 		Scope:  toStorageScope(scope),
 		Prefix: prefix,
 	})
@@ -100,7 +101,7 @@ func (c *HostBrickStorageClient) KvList(ctx context.Context, scope, prefix strin
 }
 
 func (c *HostBrickStorageClient) GetDoc(ctx context.Context, scope, collection, id string) (map[string]any, error) {
-	response, err := c.storage.GetDoc(c.withToken(ctx), &BrickStorageDocKeyRequest{
+	response, err := c.storage.GetDoc(c.withToken(ctx), &runtimev1.BrickStorageDocKeyRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 		Id:         id,
@@ -119,7 +120,7 @@ func (c *HostBrickStorageClient) CreateDoc(ctx context.Context, scope, collectio
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.storage.CreateDoc(c.withToken(ctx), &BrickStorageCreateDocRequest{
+	response, err := c.storage.CreateDoc(c.withToken(ctx), &runtimev1.BrickStorageCreateDocRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 		Data:       value,
@@ -135,7 +136,7 @@ func (c *HostBrickStorageClient) PutDoc(ctx context.Context, scope, collection s
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.storage.PutDoc(c.withToken(ctx), &BrickStoragePutDocRequest{
+	response, err := c.storage.PutDoc(c.withToken(ctx), &runtimev1.BrickStoragePutDocRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 		Doc:        value,
@@ -151,7 +152,7 @@ func (c *HostBrickStorageClient) UpdateDoc(ctx context.Context, scope, collectio
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.storage.UpdateDoc(c.withToken(ctx), &BrickStorageUpdateDocRequest{
+	response, err := c.storage.UpdateDoc(c.withToken(ctx), &runtimev1.BrickStorageUpdateDocRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 		Id:         id,
@@ -164,7 +165,7 @@ func (c *HostBrickStorageClient) UpdateDoc(ctx context.Context, scope, collectio
 }
 
 func (c *HostBrickStorageClient) DeleteDoc(ctx context.Context, scope, collection, id string) (bool, error) {
-	response, err := c.storage.DeleteDoc(c.withToken(ctx), &BrickStorageDocKeyRequest{
+	response, err := c.storage.DeleteDoc(c.withToken(ctx), &runtimev1.BrickStorageDocKeyRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 		Id:         id,
@@ -178,7 +179,7 @@ func (c *HostBrickStorageClient) DeleteDoc(ctx context.Context, scope, collectio
 func (c *HostBrickStorageClient) ListDocs(ctx context.Context, scope, collection string, query map[string]any) ([]map[string]any, error) {
 	prefix, _ := query["prefix"].(string)
 	after, _ := query["after"].(string)
-	var equals *BrickValue
+	var equals *runtimev1.BrickValue
 	if raw, ok := query["equals"]; ok {
 		value, err := AnyToBrickValue(raw)
 		if err != nil {
@@ -186,14 +187,14 @@ func (c *HostBrickStorageClient) ListDocs(ctx context.Context, scope, collection
 		}
 		equals = value
 	}
-	request := &BrickStorageListDocsRequest{
+	request := &runtimev1.BrickStorageListDocsRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 		Prefix:     prefix,
 		Equals:     equals,
 		After:      after,
 	}
-	if limit, ok := query["limit"].(float64); ok {
+	if limit, ok := int64FromAny(query["limit"]); ok && limit >= 0 {
 		value := uint32(limit)
 		request.Limit = &value
 	}
@@ -222,7 +223,7 @@ func (c *HostBrickStorageClient) Status(ctx context.Context) (map[string]any, er
 }
 
 func (c *HostBrickStorageClient) WatchDocs(ctx context.Context, scope, collection string, handler func(change map[string]any)) (func(), error) {
-	stream, err := c.storage.WatchDocs(c.withToken(ctx), &BrickStorageWatchRequest{
+	stream, err := c.storage.WatchDocs(c.withToken(ctx), &runtimev1.BrickStorageWatchRequest{
 		Scope:      toStorageScope(scope),
 		Collection: collection,
 	})
@@ -268,18 +269,18 @@ func (c *HostBrickStorageClient) withToken(ctx context.Context) context.Context 
 	return metadata.AppendToOutgoingContext(ctx, RuntimeTokenMD, c.token)
 }
 
-func toStorageScope(scope string) BrickStorageScope {
+func toStorageScope(scope string) runtimev1.BrickStorageScope {
 	switch scope {
 	case "local":
-		return BrickStorageScope_BRICK_STORAGE_SCOPE_LOCAL
+		return runtimev1.BrickStorageScope_BRICK_STORAGE_SCOPE_LOCAL
 	case "secret":
-		return BrickStorageScope_BRICK_STORAGE_SCOPE_SECRET
+		return runtimev1.BrickStorageScope_BRICK_STORAGE_SCOPE_SECRET
 	default:
-		return BrickStorageScope_BRICK_STORAGE_SCOPE_USER
+		return runtimev1.BrickStorageScope_BRICK_STORAGE_SCOPE_USER
 	}
 }
 
-func docToMap(doc *BrickStorageDoc) map[string]any {
+func docToMap(doc *runtimev1.BrickStorageDoc) map[string]any {
 	if doc == nil {
 		return nil
 	}

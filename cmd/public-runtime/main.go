@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 
 	"github.com/836145715/brickly-sdk-go"
 )
@@ -47,5 +48,7 @@ func main() {
 			"path":      tempPath,
 		}, nil
 	})
-	runtime.Start()
+	if err := runtime.Start(); err != nil {
+		log.Fatal(err)
+	}
 }

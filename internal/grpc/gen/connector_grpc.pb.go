@@ -4,7 +4,7 @@
 // - protoc             (unknown)
 // source: connector.proto
 
-package grpc
+package runtimev1
 
 import (
 	context "context"
@@ -33,6 +33,7 @@ const (
 // BrickConnectorService 供 Runtime 嵌套调用另一个 Brick，不创建新的 Binding。
 // Interact 复用 Command 的 ClientFrame / ServerFrame；目标 brick_id 放 metadata
 // x-brickly-target-brick-id，不另发明一套帧。
+// call 与 interact 共用本 RPC：metadata x-brickly-intent 为 call | interact，缺省 interact。
 // 命令内 start 的 handle_id：Invoke 走字段，Interact / Dispose 走 metadata
 // x-brickly-handle-id。owner 只由 Host 从当前 Call 注入，工具不得提交 lifetimeId。
 type BrickConnectorServiceClient interface {
@@ -100,6 +101,7 @@ func (c *brickConnectorServiceClient) Dispose(ctx context.Context, in *Connector
 // BrickConnectorService 供 Runtime 嵌套调用另一个 Brick，不创建新的 Binding。
 // Interact 复用 Command 的 ClientFrame / ServerFrame；目标 brick_id 放 metadata
 // x-brickly-target-brick-id，不另发明一套帧。
+// call 与 interact 共用本 RPC：metadata x-brickly-intent 为 call | interact，缺省 interact。
 // 命令内 start 的 handle_id：Invoke 走字段，Interact / Dispose 走 metadata
 // x-brickly-handle-id。owner 只由 Host 从当前 Call 注入，工具不得提交 lifetimeId。
 type BrickConnectorServiceServer interface {

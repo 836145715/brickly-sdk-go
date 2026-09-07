@@ -21,7 +21,7 @@ func (u *UI) CreateBrowserWindow(url string, options WindowOptions) (*WindowHand
 	}
 	if err := u.runtime.platformCall("ui.window.create", map[string]any{
 		"url":     url,
-		"options": options,
+		"options": map[string]any(options),
 	}, &res); err != nil {
 		return nil, err
 	}

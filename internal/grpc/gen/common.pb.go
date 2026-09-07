@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: common.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -920,8 +920,8 @@ const file_common_proto_rawDesc = "" +
 	"\aruntime\x18\x01 \x01(\v2(.brickly.runtime.v1.RuntimePrincipalViewH\x00R\aruntime\x12G\n" +
 	"\brenderer\x18\x02 \x01(\v2).brickly.runtime.v1.RendererPrincipalViewH\x00R\brenderer\x12;\n" +
 	"\x04host\x18\x03 \x01(\v2%.brickly.runtime.v1.HostPrincipalViewH\x00R\x04hostB\v\n" +
-	"\tprincipalB\xc2\x01\n" +
-	"\x16com.brickly.runtime.v1B\vCommonProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\tprincipalB\xd0\x01\n" +
+	"\x16com.brickly.runtime.v1B\vCommonProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once

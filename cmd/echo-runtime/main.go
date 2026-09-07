@@ -1,5 +1,7 @@
 package main
 
+import runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
+
 import (
 	"context"
 	"encoding/json"
@@ -8,11 +10,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc"
+	runtimegrpc "github.com/836145715/brickly-sdk-go/internal/grpc"
 )
 
 func main() {
-	options, err := runtimev1.TakeRuntimeEnv()
+	options, err := runtimegrpc.TakeRuntimeEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -20,16 +22,16 @@ func main() {
 		if commandID != "fail" {
 			return input, nil
 		}
-		raw, _ := runtimev1.BrickValueToJSON(input)
+		raw, _ := runtimegrpc.BrickValueToJSON(input)
 		var payload map[string]any
 		_ = json.Unmarshal(raw, &payload)
 		code, _ := payload["code"].(string)
 		if code == "" {
 			code = "INTERNAL"
 		}
-		return nil, runtimev1.StatusFromBrickCode(code, code+" without secret")
+		return nil, runtimegrpc.StatusFromBrickCode(code, code+" without secret")
 	}
-	handle, err := runtimev1.StartRuntime(options)
+	handle, err := runtimegrpc.StartRuntime(options)
 	if err != nil {
 		log.Fatal(err)
 	}

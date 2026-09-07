@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -11,9 +12,9 @@ import (
 
 type HostPlatformClient struct {
 	conn      *grpc.ClientConn
-	platform  PlatformServiceClient
-	events    EventServiceClient
-	connector BrickConnectorServiceClient
+	platform  runtimev1.PlatformServiceClient
+	events    runtimev1.EventServiceClient
+	connector runtimev1.BrickConnectorServiceClient
 	token     string
 }
 
@@ -31,9 +32,9 @@ func NewHostPlatformClient(endpoint, runtimeToHostToken string) (*HostPlatformCl
 	}
 	return &HostPlatformClient{
 		conn:      conn,
-		platform:  NewPlatformServiceClient(conn),
-		events:    NewEventServiceClient(conn),
-		connector: NewBrickConnectorServiceClient(conn),
+		platform:  runtimev1.NewPlatformServiceClient(conn),
+		events:    runtimev1.NewEventServiceClient(conn),
+		connector: runtimev1.NewBrickConnectorServiceClient(conn),
 		token:     runtimeToHostToken,
 	}, nil
 }
@@ -66,7 +67,7 @@ func (c *HostPlatformClient) PlatformCall(ctx context.Context, method string, in
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.platform.Call(c.withToken(ctx), &PlatformCallRequest{
+	response, err := c.platform.Call(c.withToken(ctx), &runtimev1.PlatformCallRequest{
 		Method: method,
 		Input:  value,
 	})
@@ -78,7 +79,7 @@ func (c *HostPlatformClient) PlatformCall(ctx context.Context, method string, in
 
 func (c *HostPlatformClient) Subscribe(topic string, onEvent func(topic string, payload any)) func() {
 	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := c.events.Subscribe(c.withToken(ctx), &SubscribeEventsRequest{Topic: topic})
+	stream, err := c.events.Subscribe(c.withToken(ctx), &runtimev1.SubscribeEventsRequest{Topic: topic})
 	if err != nil {
 		cancel()
 		return func() {}
@@ -111,7 +112,7 @@ func (c *HostPlatformClient) Publish(ctx context.Context, topic string, payload 
 	if err != nil {
 		return err
 	}
-	_, err = c.events.Publish(c.withToken(ctx), &PublishEventRequest{
+	_, err = c.events.Publish(c.withToken(ctx), &runtimev1.PublishEventRequest{
 		Topic:   topic,
 		Payload: value,
 	})
@@ -131,7 +132,7 @@ func (c *HostPlatformClient) Connect(ctx context.Context, brickID, commandID str
 	if invocationID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
 	}
-	response, err := c.connector.Invoke(callCtx, &ConnectorInvokeRequest{
+	response, err := c.connector.Invoke(callCtx, &runtimev1.ConnectorInvokeRequest{
 		BrickId:   brickID,
 		CommandId: commandID,
 		Input:     value,
@@ -156,7 +157,7 @@ func (c *HostPlatformClient) ConnectOnHandle(ctx context.Context, brickID, comma
 	if invocationID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
 	}
-	response, err := c.connector.Invoke(callCtx, &ConnectorInvokeRequest{
+	response, err := c.connector.Invoke(callCtx, &runtimev1.ConnectorInvokeRequest{
 		BrickId:   brickID,
 		CommandId: commandID,
 		Input:     value,
@@ -173,7 +174,7 @@ func (c *HostPlatformClient) StartDependency(ctx context.Context, brickID, invoc
 	if invocationID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
 	}
-	response, err := c.connector.Start(callCtx, &ConnectorStartRequest{BrickId: brickID})
+	response, err := c.connector.Start(callCtx, &runtimev1.ConnectorStartRequest{BrickId: brickID})
 	if err != nil {
 		return "", err
 	}
@@ -185,7 +186,7 @@ func (c *HostPlatformClient) DisposeDependency(ctx context.Context, handleID, in
 	if invocationID != "" {
 		callCtx = metadata.AppendToOutgoingContext(callCtx, InvocationIdMD, invocationID)
 	}
-	_, err := c.connector.Dispose(callCtx, &ConnectorDisposeRequest{HandleId: handleID, Stop: stop})
+	_, err := c.connector.Dispose(callCtx, &runtimev1.ConnectorDisposeRequest{HandleId: handleID, Stop: stop})
 	return err
 }
 

@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: registry.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -297,8 +297,8 @@ const file_registry_proto_rawDesc = "" +
 	"\x0fRuntimeRegistry\x12U\n" +
 	"\bRegister\x12#.brickly.runtime.v1.RegisterRequest\x1a$.brickly.runtime.v1.RegisterResponse\x12K\n" +
 	"\n" +
-	"Unregister\x12%.brickly.runtime.v1.UnregisterRequest\x1a\x16.google.protobuf.EmptyB\xc4\x01\n" +
-	"\x16com.brickly.runtime.v1B\rRegistryProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"Unregister\x12%.brickly.runtime.v1.UnregisterRequest\x1a\x16.google.protobuf.EmptyB\xd2\x01\n" +
+	"\x16com.brickly.runtime.v1B\rRegistryProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_registry_proto_rawDescOnce sync.Once

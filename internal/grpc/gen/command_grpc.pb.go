@@ -4,7 +4,7 @@
 // - protoc             (unknown)
 // source: command.proto
 
-package grpc
+package runtimev1
 
 import (
 	context "context"

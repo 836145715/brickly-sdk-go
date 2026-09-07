@@ -44,8 +44,19 @@ func (h *memoryLifetimeHost) Invoke(_ context.Context, handleID, _ string, _ any
 	return map[string]any{"ok": true}, nil
 }
 
-func (h *memoryLifetimeHost) Interact(ctx context.Context, handleID, commandID string, input any) (any, error) {
-	return h.Invoke(ctx, handleID, commandID, input)
+func (h *memoryLifetimeHost) Interact(ctx context.Context, handleID, commandID string, input any, opts ...InteractOptions) (Interaction, error) {
+	options, err := requireInteractOnEvent(opts)
+	if err != nil {
+		return nil, err
+	}
+	if options.OnEvent != nil {
+		options.OnEvent(map[string]any{"from": "host"})
+	}
+	result, invokeErr := h.Invoke(ctx, handleID, commandID, input)
+	if invokeErr != nil {
+		return nil, invokeErr
+	}
+	return stubInteraction{result: result}, nil
 }
 
 func (h *memoryLifetimeHost) Dispose(_ context.Context, handleID string) error {
@@ -70,9 +81,20 @@ func (h *memoryLifetimeHost) InvokeOnce(context.Context, BrickRef, string, any) 
 	return map[string]any{"once": true}, nil
 }
 
-func (h *memoryLifetimeHost) InteractOnce(context.Context, BrickRef, string, any) (any, error) {
-	return map[string]any{"once": true}, nil
+func (h *memoryLifetimeHost) InteractOnce(_ context.Context, _ BrickRef, _ string, _ any, opts ...InteractOptions) (Interaction, error) {
+	if _, err := requireInteractOnEvent(opts); err != nil {
+		return nil, err
+	}
+	return stubInteraction{result: map[string]any{"once": true}}, nil
 }
+
+type stubInteraction struct{ result any }
+
+func (s stubInteraction) Send(context.Context, any) error                 { return nil }
+func (s stubInteraction) SendLatest(context.Context, string, any) error   { return nil }
+func (s stubInteraction) Request(context.Context, any) (any, error)       { return nil, nil }
+func (s stubInteraction) End(context.Context, ...int) (any, error)        { return s.result, nil }
+func (s stubInteraction) Cancel(string)                                  {}
 
 func TestToolLifetimeStartReady(t *testing.T) {
 	sdk := NewToolSdk(newMemoryLifetimeHost())
@@ -255,5 +277,34 @@ func TestToolLifetimeCrashMarksFailed(t *testing.T) {
 	var bpp *BppError
 	if !errors.As(err, &bpp) || bpp.Code != "RUNTIME_UNAVAILABLE" {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestToolHandleInteractReturnsSession(t *testing.T) {
+	sdk := NewToolSdk(newMemoryLifetimeHost())
+	handle, err := sdk.Start(context.Background(), testTargetRef, StartToolOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = handle.Interact(context.Background(), "chat", nil)
+	if err == nil {
+		t.Fatal("expected OnEvent required")
+	}
+	seen := 0
+	session, err := handle.Interact(context.Background(), "chat", map[string]any{"model": "x"}, InteractOptions{
+		OnEvent: func(any) { seen++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.End(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.(map[string]any)["ok"] != true {
+		t.Fatalf("result %#v", result)
+	}
+	if seen != 1 {
+		t.Fatalf("onEvent %d", seen)
 	}
 }

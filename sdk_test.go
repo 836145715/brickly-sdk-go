@@ -441,6 +441,41 @@ func TestWindowExposeHandlesRequestAndNotExposed(t *testing.T) {
 	}
 }
 
+func TestWindowRequestRoutesSafeIntegerWindowID(t *testing.T) {
+	p := New()
+	handle := registerTestWindow(p, 20)
+	if err := handle.Expose(map[string]WindowExposeHandler{
+		"resume": func(any, WindowExposeSession) (any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 兼容仍注入 int64 的测试/旧路径。生产 brickValueToAny 已统一成 float64。
+	p.handleEventNotify(rawMessage{Type: "event.notify", Raw: map[string]any{
+		"event": "window.request",
+		"payload": map[string]any{
+			"windowId":  int64(20),
+			"requestId": "req-int64",
+			"name":      "resume",
+		},
+	}})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		handle.exposeMu.RLock()
+		reply := handle.lastReply
+		handle.exposeMu.RUnlock()
+		if reply != nil {
+			inner, _ := reply["reply"].(map[string]any)
+			if inner["ok"] == true {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("windowId 无论 int64 还是 float64 都必须路由到 expose")
+}
+
 func TestWindowExposeCancelAndEventScope(t *testing.T) {
 	p := New()
 	handle := registerTestWindow(p, 8)

@@ -4,16 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 )
 
-func BrickValueToJSON(value *BrickValue) (json.RawMessage, error) {
+func BrickValueToJSON(value *runtimev1.BrickValue) (json.RawMessage, error) {
 	return json.Marshal(brickValueToAny(value))
 }
 
-func AnyToBrickValue(value any) (*BrickValue, error) {
+func AnyToBrickValue(value any) (*runtimev1.BrickValue, error) {
 	switch typed := value.(type) {
 	case nil:
-		return &BrickValue{Value: &BrickValue_NullValue{NullValue: &NullValue{}}}, nil
+		return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_NullValue{NullValue: &runtimev1.NullValue{}}}, nil
 	case json.RawMessage:
 		var decoded any
 		if err := json.Unmarshal(typed, &decoded); err != nil {
@@ -21,14 +23,14 @@ func AnyToBrickValue(value any) (*BrickValue, error) {
 		}
 		return AnyToBrickValue(decoded)
 	case bool:
-		return &BrickValue{Value: &BrickValue_BoolValue{BoolValue: typed}}, nil
+		return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_BoolValue{BoolValue: typed}}, nil
 	case string:
-		return &BrickValue{Value: &BrickValue_StringValue{StringValue: typed}}, nil
+		return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_StringValue{StringValue: typed}}, nil
 	case []byte:
-		return &BrickValue{Value: &BrickValue_BytesValue{BytesValue: typed}}, nil
+		return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_BytesValue{BytesValue: typed}}, nil
 	case json.Number:
 		if i, err := typed.Int64(); err == nil && i >= -(1<<53-1) && i <= 1<<53-1 {
-			return &BrickValue{Value: &BrickValue_SafeIntegerValue{SafeIntegerValue: i}}, nil
+			return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_SafeIntegerValue{SafeIntegerValue: i}}, nil
 		}
 		f, err := typed.Float64()
 		if err != nil {
@@ -63,7 +65,7 @@ func AnyToBrickValue(value any) (*BrickValue, error) {
 		}
 		return numberBrickValue(typed)
 	case []any:
-		items := make([]*BrickValue, 0, len(typed))
+		items := make([]*runtimev1.BrickValue, 0, len(typed))
 		for _, item := range typed {
 			converted, err := AnyToBrickValue(item)
 			if err != nil {
@@ -71,76 +73,106 @@ func AnyToBrickValue(value any) (*BrickValue, error) {
 			}
 			items = append(items, converted)
 		}
-		return &BrickValue{Value: &BrickValue_ListValue{ListValue: &BrickList{Items: items}}}, nil
+		return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_ListValue{ListValue: &runtimev1.BrickList{Items: items}}}, nil
 	case map[string]any:
-		fields := make([]*BrickObjectField, 0, len(typed))
+		fields := make([]*runtimev1.BrickObjectField, 0, len(typed))
 		for key, item := range typed {
 			converted, err := AnyToBrickValue(item)
 			if err != nil {
 				return nil, err
 			}
-			fields = append(fields, &BrickObjectField{Key: key, Value: converted})
+			fields = append(fields, &runtimev1.BrickObjectField{Key: key, Value: converted})
 		}
-		return &BrickValue{Value: &BrickValue_ObjectValue{ObjectValue: &BrickObject{Fields: fields}}}, nil
+		return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_ObjectValue{ObjectValue: &runtimev1.BrickObject{Fields: fields}}}, nil
 	default:
-		return nil, fmt.Errorf("不支持的 BrickValue 类型：%T", value)
+		// 具名 map / struct（如 brickly.WindowOptions）走 JSON 再解成 any，避免嵌在 map[string]any 里时类型断言失败。
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("不支持的 BrickValue 类型：%T", value)
+		}
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return nil, err
+		}
+		return AnyToBrickValue(decoded)
 	}
 }
 
-func brickValueToAny(value *BrickValue) any {
+func brickValueToAny(value *runtimev1.BrickValue) any {
 	if value == nil {
 		return nil
 	}
 	switch typed := value.Value.(type) {
-	case *BrickValue_BoolValue:
+	case *runtimev1.BrickValue_BoolValue:
 		return typed.BoolValue
-	case *BrickValue_SafeIntegerValue:
-		return typed.SafeIntegerValue
-	case *BrickValue_NumberValue:
+	case *runtimev1.BrickValue_SafeIntegerValue:
+		// 与 encoding/json 解进 map[string]any 一致：安全整数也是 float64。
+		// 线上仍是 SafeInteger；取值不要 .(int64)。
+		return float64(typed.SafeIntegerValue)
+	case *runtimev1.BrickValue_NumberValue:
 		return typed.NumberValue
-	case *BrickValue_StringValue:
+	case *runtimev1.BrickValue_StringValue:
 		return typed.StringValue
-	case *BrickValue_BytesValue:
+	case *runtimev1.BrickValue_BytesValue:
 		return typed.BytesValue
-	case *BrickValue_ListValue:
+	case *runtimev1.BrickValue_ListValue:
 		items := make([]any, 0, len(typed.ListValue.GetItems()))
 		for _, item := range typed.ListValue.GetItems() {
 			items = append(items, brickValueToAny(item))
 		}
 		return items
-	case *BrickValue_ObjectValue:
+	case *runtimev1.BrickValue_ObjectValue:
 		object := make(map[string]any, len(typed.ObjectValue.GetFields()))
 		for _, field := range typed.ObjectValue.GetFields() {
 			object[field.GetKey()] = brickValueToAny(field.GetValue())
 		}
 		return object
-	case *BrickValue_ResourceValue:
+	case *runtimev1.BrickValue_ResourceValue:
 		return map[string]any{
 			"resourceId": typed.ResourceValue.GetResourceId(),
-			"sizeBytes":  typed.ResourceValue.GetSizeBytes(),
+			"sizeBytes":  float64(typed.ResourceValue.GetSizeBytes()),
 		}
 	default:
 		return nil
 	}
 }
 
-func integerBrickValue(value int64) (*BrickValue, error) {
+func integerBrickValue(value int64) (*runtimev1.BrickValue, error) {
 	if value < -(1<<53-1) || value > 1<<53-1 {
 		return nil, fmt.Errorf("BrickValue.integer 超出安全整数范围")
 	}
-	return &BrickValue{Value: &BrickValue_SafeIntegerValue{SafeIntegerValue: value}}, nil
+	return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_SafeIntegerValue{SafeIntegerValue: value}}, nil
 }
 
-func unsignedBrickValue(value uint64) (*BrickValue, error) {
+func unsignedBrickValue(value uint64) (*runtimev1.BrickValue, error) {
 	if value > 1<<53-1 {
 		return nil, fmt.Errorf("BrickValue.integer 超出安全整数范围")
 	}
 	return integerBrickValue(int64(value))
 }
 
-func numberBrickValue(value float64) (*BrickValue, error) {
+func int64FromAny(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, true
+	case int:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case float64:
+		n := int64(typed)
+		return n, float64(n) == typed
+	case json.Number:
+		n, err := typed.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func numberBrickValue(value float64) (*runtimev1.BrickValue, error) {
 	if math.IsNaN(value) || math.IsInf(value, 0) || math.Signbit(value) && value == 0 {
 		return nil, fmt.Errorf("BrickValue.number 必须是有限非负零数字")
 	}
-	return &BrickValue{Value: &BrickValue_NumberValue{NumberValue: value}}, nil
+	return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_NumberValue{NumberValue: value}}, nil
 }

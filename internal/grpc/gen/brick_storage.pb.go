@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: brick_storage.proto
 
-package grpc
+package runtimev1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -1277,8 +1277,8 @@ const file_brick_storage_proto_rawDesc = "" +
 	"\tDeleteDoc\x12-.brickly.runtime.v1.BrickStorageDocKeyRequest\x1a..brickly.runtime.v1.BrickStorageDeleteResponse\x12m\n" +
 	"\bListDocs\x12/.brickly.runtime.v1.BrickStorageListDocsRequest\x1a0.brickly.runtime.v1.BrickStorageListDocsResponse\x12h\n" +
 	"\tWatchDocs\x12,.brickly.runtime.v1.BrickStorageWatchRequest\x1a+.brickly.runtime.v1.BrickStorageChangeEvent0\x01\x12H\n" +
-	"\x06Status\x12\x16.google.protobuf.Empty\x1a&.brickly.runtime.v1.BrickStorageStatusB\xc8\x01\n" +
-	"\x16com.brickly.runtime.v1B\x11BrickStorageProtoP\x01Z1github.com/836145715/brickly-sdk-go/internal/grpc\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
+	"\x06Status\x12\x16.google.protobuf.Empty\x1a&.brickly.runtime.v1.BrickStorageStatusB\xd6\x01\n" +
+	"\x16com.brickly.runtime.v1B\x11BrickStorageProtoP\x01Z?github.com/836145715/brickly-sdk-go/internal/grpc/gen;runtimev1\xa2\x02\x03BRX\xaa\x02\x12Brickly.Runtime.V1\xca\x02\x12Brickly\\Runtime\\V1\xe2\x02\x1eBrickly\\Runtime\\V1\\GPBMetadata\xea\x02\x14Brickly::Runtime::V1b\x06proto3"
 
 var (
 	file_brick_storage_proto_rawDescOnce sync.Once

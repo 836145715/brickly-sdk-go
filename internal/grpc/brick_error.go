@@ -3,6 +3,7 @@ package grpc
 import (
 	"strings"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -38,9 +39,9 @@ func StatusFromBrickCode(code, message string) error {
 		message = strings.ReplaceAll(message, "token", "***")
 	}
 	st := status.New(mapped, message)
-	detail := &BrickError{Code: code, Message: message}
+	detail := &runtimev1.BrickError{Code: code, Message: message}
 	if code == "INVALID_INPUT" {
-		if packed, err := anypb.New(&InvalidInputDetail{Field: "input", Reason: "invalid"}); err == nil {
+		if packed, err := anypb.New(&runtimev1.InvalidInputDetail{Field: "input", Reason: "invalid"}); err == nil {
 			detail.Details = packed
 		}
 	}

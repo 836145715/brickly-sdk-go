@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -16,7 +17,7 @@ import (
 )
 
 type hangConnector struct {
-	runtimegrpc.UnimplementedBrickConnectorServiceServer
+	runtimev1.UnimplementedBrickConnectorServiceServer
 	entered chan struct{}
 }
 
@@ -27,19 +28,19 @@ func (h *hangConnector) signalEntered() {
 	}
 }
 
-func (h *hangConnector) Invoke(ctx context.Context, _ *runtimegrpc.ConnectorInvokeRequest) (*runtimegrpc.InvokeResult, error) {
+func (h *hangConnector) Invoke(ctx context.Context, _ *runtimev1.ConnectorInvokeRequest) (*runtimev1.InvokeResult, error) {
 	h.signalEntered()
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-func (h *hangConnector) Start(ctx context.Context, _ *runtimegrpc.ConnectorStartRequest) (*runtimegrpc.ConnectorStartResponse, error) {
+func (h *hangConnector) Start(ctx context.Context, _ *runtimev1.ConnectorStartRequest) (*runtimev1.ConnectorStartResponse, error) {
 	h.signalEntered()
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-func (h *hangConnector) Interact(stream grpc.BidiStreamingServer[runtimegrpc.ClientFrame, runtimegrpc.ServerFrame]) error {
+func (h *hangConnector) Interact(stream grpc.BidiStreamingServer[runtimev1.ClientFrame, runtimev1.ServerFrame]) error {
 	h.signalEntered()
 	<-stream.Context().Done()
 	return stream.Context().Err()
@@ -53,7 +54,7 @@ func startRuntimeHangConnector(t *testing.T) (*Runtime, *hangConnector) {
 	}
 	hang := &hangConnector{entered: make(chan struct{}, 1)}
 	server := grpc.NewServer()
-	runtimegrpc.RegisterBrickConnectorServiceServer(server, hang)
+	runtimev1.RegisterBrickConnectorServiceServer(server, hang)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	client, err := runtimegrpc.NewHostPlatformClient(listener.Addr().String(), "tok")
