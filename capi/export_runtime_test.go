@@ -7,7 +7,7 @@ import (
 )
 
 func TestVersionPointers(t *testing.T) {
-	if goString(brickly_version()) != "0.10.0" {
+	if goString(brickly_version()) != "0.11.0" {
 		t.Fatalf("version=%s", goString(brickly_version()))
 	}
 	if goString(brickly_protocol_version()) != "brickly.runtime.v1" {

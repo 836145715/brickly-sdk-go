@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -128,10 +129,9 @@ func brickValueToAny(value *runtimev1.BrickValue) any {
 		}
 		return object
 	case *runtimev1.BrickValue_ResourceValue:
-		return map[string]any{
-			"resourceId": typed.ResourceValue.GetResourceId(),
-			"sizeBytes":  float64(typed.ResourceValue.GetSizeBytes()),
-		}
+		// 与 Node SDK 的 toSdkResourceRef 对齐：补全 kind/sha256/expiresAt，
+		// 否则下游 hydrateResourceValue 认不出 ResourceRef。
+		return resourceRefToAny(typed.ResourceValue)
 	default:
 		return nil
 	}
@@ -142,6 +142,24 @@ func integerBrickValue(value int64) (*runtimev1.BrickValue, error) {
 		return nil, fmt.Errorf("BrickValue.integer 超出安全整数范围")
 	}
 	return &runtimev1.BrickValue{Value: &runtimev1.BrickValue_SafeIntegerValue{SafeIntegerValue: value}}, nil
+}
+
+// resourceRefToAny 把线上 ResourceRef 解码成与 Node SDK 一致的 map 形状。
+func resourceRefToAny(ref *runtimev1.ResourceRef) map[string]any {
+	out := map[string]any{
+		"kind":       "brickly.resource",
+		"resourceId": ref.GetResourceId(),
+		"sizeBytes":  float64(ref.GetSizeBytes()),
+		"sha256":     hex.EncodeToString(ref.GetSha256()),
+		"expiresAt":  float64(ref.GetExpiresAt().AsTime().UnixMilli()),
+	}
+	if ref.GetName() != "" {
+		out["name"] = ref.GetName()
+	}
+	if ref.GetMediaType() != "" {
+		out["mimeType"] = ref.GetMediaType()
+	}
+	return out
 }
 
 func unsignedBrickValue(value uint64) (*runtimev1.BrickValue, error) {

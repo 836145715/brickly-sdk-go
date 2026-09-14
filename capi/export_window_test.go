@@ -46,7 +46,7 @@ func TestWindowOpsRejectInvalidHandle(t *testing.T) {
 func TestUiCreateWindowWithoutHostFails(t *testing.T) {
 	id := brickly_new()
 	defer brickly_free(id)
-	_, code, _, rc := callUiCreateWindow(uint64(id), "ui/lab.html", `{"width":640,"height":480,"lifetime":"standalone"}`)
+	_, code, _, rc := callUiCreateWindow(uint64(id), "ui/lab.html", `{"width":640,"height":480,"keepAlive":true}`)
 	if rc == 0 {
 		t.Fatal("无 Host 时开窗应失败")
 	}

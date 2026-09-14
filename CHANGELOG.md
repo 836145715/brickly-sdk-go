@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-09-13
+
+### Breaking
+
+- 子窗绑定改由 API 对象决定：`ctx.UI` 只创建 Call 窗（跟这次命令走），`Runtime.UI` 只创建 Session 窗（跟当前占用走）。
+- 删除 `WindowOptions` 的 `"lifetime"`（`attached` / `standalone`）与清单 `command.window` 机制；传入 `"lifetime"` 报 `INVALID_INPUT`。Session 窗常驻改用 `"keepAlive": true`（默认 false，创建时必须展示）。
+
+### Features
+
+- `Runtime.UI` 的 `keepAlive` Session 窗：Claim 交回后窗口仍可保住 Session。`Dispose` 关闭 Call 窗与 `keepAlive=false` 的 Session 窗并交回 Claim；`Stop` 取消该 Session 的调用并关闭全部 runtime-child 窗。
+
 ## 0.10.0 - 2026-09-07
 
 ### Breaking

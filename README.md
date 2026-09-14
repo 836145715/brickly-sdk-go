@@ -106,11 +106,11 @@ poem, err := brickly.Call(ctx, client, "complete", map[string]any{"prompt": "写
 })
 ```
 
-### 进阶：两种子窗
+### 进阶：Call 窗与 Session 窗
 
-`attached`（默认）随这次调用 / runtime 消失。`standalone` 窗在则 runtime 在：须声明 `command.window: standalone`，并在命令执行期间创建。后台定时弹窗请 `Invoke` 一条 `window: standalone` 的命令，不要直接 `CreateBrowserWindow`。建窗写 `"lifetime": "standalone"`。不要把「附加」理解成常驻。
+`ctx.UI` 只开 Call 窗：跟这次命令走，命令结束就关。`Runtime.UI` 开 Session 窗：跟当前占用走；`keepAlive: true` 时 Claim 交回后窗仍可保住 Session。不要写 `"lifetime"` 或清单 `command.window`。后台定时弹窗请 `Invoke` 再在命令里开窗，不要在定时器里直接 `CreateBrowserWindow`。`per-call` 没有 Session，不能用 `Runtime.UI`。
 
-长期占用使用 `ToolSdk.Start` 与 `ToolHandle.Dispose`/`Stop`。Runtime 里占用依赖用 `Require(alias).Start()`，必须先进入自己的命令（`Invoke` 中转）；占用跟这次 Call，return 自动放手。`Close` 是无 force 参数的 `Dispose` 别名。`Owner` context 只等价于 `Dispose`，不会 `Stop`。子窗口默认 attached。
+长期占用使用 `ToolSdk.Start` 与 `ToolHandle.Dispose`/`Stop`。Runtime 里占用依赖用 `Require(alias).Start()`，必须先进入自己的命令（`Invoke` 中转）；占用跟这次 Call，return 自动放手。`Close` 是无 force 参数的 `Dispose` 别名。`Owner` context 只等价于 `Dispose`，不会 `Stop`。
 
 ---
 
@@ -662,7 +662,7 @@ return nil, brickly.NewBppError("INVALID_INPUT", "text is required")
 
 - **白名单真相源**：[`specs/window-protocol.schema.json`](../../../specs/window-protocol.schema.json) 的 `BrickWindowMethod.enum`
 - **跨语言协议规范**：[`specs/window-api.md`](../../../specs/window-api.md)（Node / Go / Python SDK 共用）
-- 当前 SDK 版本：`0.10.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
+- 当前 SDK 版本：`0.11.0`（`SdkVersion`）；生产协议是 `brickly.runtime.v1`
 - 发布记录见 [`CHANGELOG.md`](./CHANGELOG.md)
 - `window_protocol_generated.go` 由 Schema 生成，`TestWhitelistMatchesSchema` 额外强制方法集合完全同步
 
@@ -685,13 +685,13 @@ Go SDK 通过 GitHub 仓库 tag 发布，不需要像 npm 一样上传包。发�
 
 ```bash
 cd Brickly
-node scripts/publish-go-sdk.mjs 0.10.0
+node scripts/publish-go-sdk.mjs 0.11.0
 ```
 
 默认导出到 `../brickly-sdk-go`。如果你的独立仓库 clone 在其他位置：
 
 ```bash
-node scripts/publish-go-sdk.mjs 0.10.0 --repo D:\brick-project\brickly-sdk-go
+node scripts/publish-go-sdk.mjs 0.11.0 --repo D:\brick-project\brickly-sdk-go
 ```
 
 脚本会执行：
@@ -699,14 +699,14 @@ node scripts/publish-go-sdk.mjs 0.10.0 --repo D:\brick-project\brickly-sdk-go
 - `go test ./...`
 - 同步 `packages/brickly-sdk-go` 到独立仓库根目录
 - `git commit`
-- `git tag -a v0.10.0`
-- `git push origin <branch>` 和 `git push origin v0.10.0`
-- `go list -m github.com/836145715/brickly-sdk-go@v0.10.0` 触发 Go module 缓存
+- `git tag -a v0.11.0`
+- `git push origin <branch>` 和 `git push origin v0.11.0`
+- `go list -m github.com/836145715/brickly-sdk-go@v0.11.0` 触发 Go module 缓存
 
 发布后，普通开发者这样依赖：
 
 ```bash
-go get github.com/836145715/brickly-sdk-go@v0.10.0
+go get github.com/836145715/brickly-sdk-go@v0.11.0
 ```
 
 ---

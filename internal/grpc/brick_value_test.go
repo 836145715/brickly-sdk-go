@@ -4,6 +4,12 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	runtimev1 "github.com/836145715/brickly-sdk-go/internal/grpc/gen"
 )
 
 func TestBrickValueIntegerMatchesJSONNumberType(t *testing.T) {
@@ -45,7 +51,7 @@ func TestAnyToBrickValueNestedNamedMap(t *testing.T) {
 		"options": WindowOptions{
 			"width":    720,
 			"title":    "C++ SDK 实验室",
-			"lifetime": "standalone",
+			"keepAlive": true,
 		},
 	})
 	if err != nil {
@@ -83,5 +89,37 @@ func TestJsonInputThenAnyToBrickValueWindowOptions(t *testing.T) {
 	_, err = AnyToBrickValue(normalized)
 	if err != nil {
 		t.Fatalf("PlatformCall 路径应能编码 WindowOptions: %v", err)
+	}
+}
+
+// 宿主把 ResourceRef 编码成 resource_value 变体；解码必须还原完整 ref
+// （kind/sha256/expiresAt），否则 hydrateResourceValue 认不出资源。
+func TestBrickValueResourceValueDecodesFullRef(t *testing.T) {
+	value := &runtimev1.BrickValue{Value: &runtimev1.BrickValue_ResourceValue{ResourceValue: &runtimev1.ResourceRef{
+		ResourceId: "res_decoderfix0000000001",
+		SizeBytes:  1024,
+		Name:       proto.String("pattern-1024.bin"),
+		MediaType:  proto.String("application/octet-stream"),
+		Sha256:     []byte{0x2e, 0xdc, 0x98, 0x68, 0x47, 0xe2, 0x09, 0xb4, 0x01, 0x6e, 0x14, 0x1a, 0x6d, 0xc8, 0x71, 0x6d, 0x32, 0x07, 0x35, 0x0f, 0x41, 0x69, 0x93, 0x82, 0xd4, 0x31, 0x53, 0x9b, 0xf2, 0x92, 0xe4, 0xa1},
+		ExpiresAt:  timestamppb.New(time.UnixMilli(1789360465693)),
+	}}}
+	got, _ := brickValueToAny(value).(map[string]any)
+	if got["kind"] != "brickly.resource" {
+		t.Fatalf("解码必须带 kind=brickly.resource，得到 %#v", got)
+	}
+	if got["resourceId"] != "res_decoderfix0000000001" {
+		t.Fatalf("resourceId=%#v", got["resourceId"])
+	}
+	if got["sizeBytes"] != float64(1024) {
+		t.Fatalf("sizeBytes=%#v", got["sizeBytes"])
+	}
+	if got["sha256"] != "2edc986847e209b4016e141a6dc8716d3207350f41699382d431539bf292e4a1" {
+		t.Fatalf("sha256=%#v", got["sha256"])
+	}
+	if got["expiresAt"] != float64(1789360465693) {
+		t.Fatalf("expiresAt=%#v", got["expiresAt"])
+	}
+	if got["name"] != "pattern-1024.bin" || got["mimeType"] != "application/octet-stream" {
+		t.Fatalf("name/mediaType 丢失：%#v", got)
 	}
 }

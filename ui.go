@@ -13,13 +13,21 @@ type UI struct {
 // CreateBrowserWindow 创建子窗口并返回句柄。
 // url 可以是 http(s)、file:// 或相对 ui/ 目录的 html 路径。
 func (u *UI) CreateBrowserWindow(url string, options WindowOptions) (*WindowHandle, error) {
+	normalized, err := NormalizeSessionWindowOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	return createBrowserWindow(u.runtime, url, normalized)
+}
+
+func createBrowserWindow(runtime *Runtime, url string, options WindowOptions) (*WindowHandle, error) {
 	var res struct {
 		WindowKey     string `json:"windowKey"`
 		WindowID      int64  `json:"windowId"`
 		WebContentsID int64  `json:"webContentsId"`
 		URL           string `json:"url"`
 	}
-	if err := u.runtime.platformCall("ui.window.create", map[string]any{
+	if err := runtime.platformCall("ui.window.create", map[string]any{
 		"url":     url,
 		"options": map[string]any(options),
 	}, &res); err != nil {
@@ -28,10 +36,10 @@ func (u *UI) CreateBrowserWindow(url string, options WindowOptions) (*WindowHand
 	if res.WindowKey == "" || res.WindowID == 0 || res.WebContentsID == 0 {
 		return nil, NewBppError("PROTOCOL_ERROR", "ui.window.create returned an invalid result")
 	}
-	h := newWindowHandleFromResult(u.runtime, res.WindowKey, res.WindowID, res.WebContentsID, res.URL)
-	u.runtime.windowsMu.Lock()
-	u.runtime.windows[res.WindowID] = h
-	u.runtime.windowsMu.Unlock()
+	h := newWindowHandleFromResult(runtime, res.WindowKey, res.WindowID, res.WebContentsID, res.URL)
+	runtime.windowsMu.Lock()
+	runtime.windows[res.WindowID] = h
+	runtime.windowsMu.Unlock()
 	return h, nil
 }
 
@@ -51,7 +59,11 @@ type ScopedUI struct {
 }
 
 func (u *ScopedUI) CreateBrowserWindow(url string, options WindowOptions) (*ScopedWindowHandle, error) {
-	win, err := (&UI{runtime: u.runtime}).CreateBrowserWindow(url, options)
+	normalized, err := NormalizeCallWindowOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	win, err := createBrowserWindow(u.runtime, url, normalized)
 	if err != nil {
 		return nil, err
 	}
