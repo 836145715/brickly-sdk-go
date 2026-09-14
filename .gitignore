@@ -6,3 +6,4 @@ capi/*.so
 capi/*.dylib
 capi/*.exe
 capi/capi.h
+node_modules/ 

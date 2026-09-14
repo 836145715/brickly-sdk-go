@@ -1,0 +1,12 @@
+{
+  "name": "brickly-sdk-go",
+  "private": true,
+  "version": "0.11.0",
+  "description": "Brickly Go SDK 测试依赖（真宿主工件）。Go 模块本体见 go.mod。",
+  "scripts": {
+    "test:host": "go test ./tests/hostconformance/"
+  },
+  "devDependencies": {
+    "@syllm/brickly-test-host": "0.11.0"
+  }
+}
