@@ -7,6 +7,6 @@
     "test:host": "go test ./tests/hostconformance/"
   },
   "devDependencies": {
-    "@syllm/brickly-test-host": "0.11.0"
+    "@syllm/brickly-test-host": "0.12.1"
   }
 }

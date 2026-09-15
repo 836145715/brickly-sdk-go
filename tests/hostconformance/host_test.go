@@ -57,6 +57,7 @@ func startTestHost(t *testing.T) *testHost {
 	if bundle == "" {
 		t.Skip("未找到 @syllm/brickly-test-host bundle；先 npm i -D @syllm/brickly-test-host")
 	}
+	t.Logf("bundle=%s", bundle)
 
 	cmd := exec.Command("node", bundle)
 	stdin, err := cmd.StdinPipe()
@@ -125,7 +126,7 @@ func (h *testHost) post(t *testing.T, path string, body any) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	resp, err := http.Post("http://"+h.controlEndpoint+path, "application/json", bytes.NewReader(raw))
+	resp, err := postRaw("http://"+h.controlEndpoint+path, raw)
 	if err != nil {
 		t.Fatalf("控制面 %s: %v", path, err)
 	}
@@ -133,6 +134,14 @@ func (h *testHost) post(t *testing.T, path string, body any) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("控制面 %s 返回 %d", path, resp.StatusCode)
 	}
+}
+
+func postRaw(url string, raw []byte) (*http.Response, error) {
+	return http.Post(url, "application/json", bytes.NewReader(raw))
+}
+
+func getRaw(url string) (*http.Response, error) {
+	return http.Get(url)
 }
 
 func (h *testHost) setFault(t *testing.T, path, brickCode string, count int) {
