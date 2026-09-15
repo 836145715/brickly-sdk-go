@@ -144,6 +144,13 @@ func (p *Runtime) Start() error {
 		return err
 	}
 	p.Config = ReadInjectedProfileConfig()
+	if raw := os.Getenv(runtimegrpc.DependencyBindingsEnv); raw != "" {
+		// 与 Node/Python 对齐：spawn 注入的依赖绑定在启动时一次性载入。
+		if err := p.Dependencies.replace(json.RawMessage(raw)); err != nil {
+			p.started.Store(false)
+			return err
+		}
+	}
 	if err := p.startGRPC(); err != nil {
 		p.Error("grpc runtime start failed", err, nil)
 		p.started.Store(false)

@@ -30,6 +30,8 @@ const (
 	BootstrapEnv     = "BRICKLY_BOOTSTRAP_TOKEN"
 	RuntimeToHostEnv = "BRICKLY_RUNTIME_TO_HOST_TOKEN"
 	HostToRuntimeEnv = "BRICKLY_HOST_TO_RUNTIME_TOKEN"
+	// 与 Node/Python 对齐：Host spawn 注入的依赖绑定（alias → BrickRef JSON）。
+	DependencyBindingsEnv = "BRICKLY_DEPENDENCY_BINDINGS"
 	// 与宿主 10MiB 业务顶对齐，12MiB 留给 protobuf 信封。
 	invokeMaxBytes   = 12 * 1024 * 1024
 	resourceMaxBytes = 4 * 1024 * 1024
